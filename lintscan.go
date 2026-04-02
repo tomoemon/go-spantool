@@ -340,9 +340,12 @@ func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, enclosingBody *ast.B
 	}
 
 	// Find the variable's type in the function body
-	typeName := findVarTypeName(body, varIdent.Name)
-	if typeName == "" {
+	typeName, anonStruct := findVarType(body, varIdent.Name)
+	if typeName == "" && anonStruct == nil {
 		return nil
+	}
+	if anonStruct != nil {
+		return extractTagsFromStructType(anonStruct)
 	}
 
 	// Search order: callback body -> enclosing function body -> file top-level
@@ -355,7 +358,7 @@ func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, enclosingBody *ast.B
 	return extractStructSpannerTags(file, typeName)
 }
 
-func findVarTypeName(body *ast.BlockStmt, varName string) string {
+func findVarType(body *ast.BlockStmt, varName string) (string, *ast.StructType) {
 	for _, stmt := range body.List {
 		switch s := stmt.(type) {
 		case *ast.DeclStmt:
@@ -371,7 +374,10 @@ func findVarTypeName(body *ast.BlockStmt, varName string) string {
 				for _, name := range vs.Names {
 					if name.Name == varName {
 						if ident, ok := vs.Type.(*ast.Ident); ok {
-							return ident.Name
+							return ident.Name, nil
+						}
+						if st, ok := vs.Type.(*ast.StructType); ok {
+							return "", st
 						}
 					}
 				}
@@ -385,7 +391,7 @@ func findVarTypeName(body *ast.BlockStmt, varName string) string {
 					if i < len(s.Rhs) {
 						if comp, ok := s.Rhs[i].(*ast.CompositeLit); ok {
 							if typeIdent, ok := comp.Type.(*ast.Ident); ok {
-								return typeIdent.Name
+								return typeIdent.Name, nil
 							}
 						}
 					}
@@ -393,7 +399,7 @@ func findVarTypeName(body *ast.BlockStmt, varName string) string {
 			}
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func hasNolintComment(file *ast.File, fset *token.FileSet, pos token.Pos) bool {
