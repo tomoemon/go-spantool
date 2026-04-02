@@ -973,3 +973,215 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 		t.Errorf("expected no diagnostics, got %v", diags)
 	}
 }
+
+func TestScan_ParamsMatch(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID, Username FROM User WHERE UserID = @id AND Active = @active`" + `,
+		Params: map[string]interface{}{"id": 1, "active": true},
+	}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
+	}
+}
+
+func TestScan_ParamsMissingInMap(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id AND Active = @active`" + `,
+		Params: map[string]interface{}{"id": 1},
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "@active") && strings.Contains(d.Message, "not provided in Params") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about missing @active param, got %v", diags)
+	}
+}
+
+func TestScan_ParamsUnusedInSQL(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: map[string]interface{}{"id": 1, "extra": 2},
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `"extra"`) && strings.Contains(d.Message, "not referenced in SQL") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about unused Params key \"extra\", got %v", diags)
+	}
+}
+
+func TestScan_ParamsVariableError(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	params := map[string]interface{}{"id": 1}
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: params,
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "Params must be a map literal") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about Params not being a map literal, got %v", diags)
+	}
+}
+
+func TestScan_ParamsVariableNolint(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	params := map[string]interface{}{"id": 1}
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: params, //nolint:spantool
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "Params must be a map literal") {
+			t.Errorf("expected no diagnostic with nolint comment, got %v", diags)
+		}
+	}
+}
+
+func TestScan_ParamsAbsentWithSQLParams(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	// Params field absent and not resolvable -> skip param checking
+	for _, d := range diags {
+		if strings.Contains(d.Message, "@id") {
+			t.Errorf("expected no param diagnostics when Params field absent, got %v", diags)
+		}
+	}
+}
+
+func TestScan_NoParamsNoSQLParams(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User`" + `,
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
+	}
+}
+
+func TestScan_ParamsEmptyMapWithSQLParams(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: map[string]interface{}{},
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "@id") && strings.Contains(d.Message, "not provided in Params") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about missing @id param, got %v", diags)
+	}
+}
+
+func TestScan_ParamsWithoutCallback(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: map[string]interface{}{"id": 1, "extra": 2},
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `"extra"`) && strings.Contains(d.Message, "not referenced in SQL") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about unused Params key \"extra\", got %v", diags)
+	}
+}

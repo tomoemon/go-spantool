@@ -5,7 +5,7 @@ A static analysis and formatting tool for Google Cloud Spanner Go code.
 ## Overview
 
 - [lint-mutation](#lint-mutation) - Validate mutation map literals against DDL schema
-- [lint-scan](#lint-scan) - Detect mismatches between SELECT columns and `row.Columns` / `row.ToStruct`
+- [lint-scan](#lint-scan) - Detect mismatches between SELECT columns and `row.Columns` / `row.ToStruct`, and between SQL parameters and `Params` map keys
 - [fmt-sql](#fmt-sql) - Auto-format SQL in `spanner.Statement{SQL: ...}` literals
 
 ## Features
@@ -91,7 +91,7 @@ spanner.InsertMap("User", m)
 
 ### lint-scan
 
-Validates that SELECT columns in `spanner.Statement{SQL: ...}` match the scan usage in the associated `func(*spanner.Row) error` callback.
+Validates that SELECT columns in `spanner.Statement{SQL: ...}` match the scan usage in the associated `func(*spanner.Row) error` callback. Also validates that SQL parameters (`@param`) match the keys in the `Params` map.
 
 Detection targets any function call whose arguments contain both a `spanner.Statement{SQL: ...}` literal and a `func(*spanner.Row) error` callback:
 
@@ -105,6 +105,7 @@ Detection rules:
 
 - `row.Columns(&a, &b, &c)`: the number of arguments must match the number of SELECT columns
 - `row.ToStruct(&v)`: the struct's `spanner:"..."` tags (or field names) must match the SELECT column names
+- Column name and count only: type compatibility between Spanner types (e.g. INT64) and Go types (e.g. int64) is not checked
   - Type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
 - Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
 - `SELECT *` and `t.*` are skipped with a warning (column count is indeterminate without DDL). Use `-no-star` flag to forbid `SELECT *` usage entirely
@@ -112,6 +113,9 @@ Detection rules:
 - Spanner package alias imports are supported
 - Callbacks with `_` parameter (e.g. `func(_ *spanner.Row) error`) are skipped
 - Reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an unresolvable function). Add `//nolint:spantool` comment to suppress
+- `Params` map keys must match SQL parameters (`@param`): reports an error for missing or unused keys
+  - Only map literals are analyzed; variable references report an error. Add `//nolint:spantool` comment to suppress
+  - Params checking works independently of callback detection
 
 Valid - column count matches:
 
@@ -182,6 +186,44 @@ func scanUser(row *spanner.Row) error {
 helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, func(row *spanner.Row) error {
     return scanUser(row)
 })
+```
+
+Valid - SQL parameters match Params map keys:
+
+```go
+helper(ctx, spanner.Statement{
+    SQL:    `SELECT UserID, Username FROM User WHERE UserID = @id AND Active = @active`,
+    Params: map[string]interface{}{"id": 1, "active": true},
+}, func(row *spanner.Row) error {
+    var a, b interface{}
+    return row.Columns(&a, &b)
+})
+```
+
+Error - SQL parameter not provided in Params map:
+
+```go
+helper(ctx, spanner.Statement{
+    SQL:    `SELECT UserID FROM User WHERE UserID = @id AND Active = @active`,
+    Params: map[string]interface{}{"id": 1},
+}, func(row *spanner.Row) error {
+    var a interface{}
+    return row.Columns(&a)
+})
+// => SQL parameter @active is used in SQL but not provided in Params map
+```
+
+Error - Params key not referenced in SQL:
+
+```go
+helper(ctx, spanner.Statement{
+    SQL:    `SELECT UserID FROM User WHERE UserID = @id`,
+    Params: map[string]interface{}{"id": 1, "extra": 2},
+}, func(row *spanner.Row) error {
+    var a interface{}
+    return row.Columns(&a)
+})
+// => Params key "extra" is not referenced in SQL
 ```
 
 ### fmt-sql
