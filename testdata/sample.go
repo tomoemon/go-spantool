@@ -1,14 +1,31 @@
 package sample
 
-const listSubscriptions = `SELECT u.UserID, u.Username, u.Email, u.CreatedAt, u.UpdatedAt FROM` + " `Subscription`" + ` s JOIN User u ON s.TargetUserID = u.UserID WHERE s.SourceUserID = @sourceUserID ORDER BY s.CreatedAt DESC LIMIT @limit OFFSET @offset`
+import "cloud.google.com/go/spanner"
 
-const countThreadComments = `
-SELECT count(*) AS cnt
-FROM Comment c
-JOIN Thread t ON c.ThreadID = t.ThreadID
-WHERE t.ProjectID = @projectID
-`
+type userRow struct {
+	UserID   int64  `spanner:"UserID"`
+	Username string `spanner:"Username"`
+	Extra    string `spanner:"Extra"`
+}
 
-const notSQL = `This is not SQL, just a regular string`
+func example() {
+	// columns mismatch: SELECT has 3 columns but row.Columns has 2 arguments
+	helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
 
-var dynamicString = "SELECT * FROM t" // double-quoted strings are not targeted
+	// toStruct mismatch: struct field "Extra" has no corresponding SELECT column
+	helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username FROM User`}, func(row *spanner.Row) error {
+		var v userRow
+		return row.ToStruct(&v)
+	})
+
+	// SELECT * warning
+	helper(ctx, spanner.Statement{SQL: `SELECT * FROM User`}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}

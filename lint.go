@@ -47,13 +47,24 @@ func runLintMutation(args []string) {
 	}
 }
 
+type Severity int
+
+const (
+	SeverityError Severity = iota
+	SeverityWarning
+)
+
 type Diagnostic struct {
-	File    string
-	Line    int
-	Message string
+	Severity Severity
+	File     string
+	Line     int
+	Message  string
 }
 
 func (d Diagnostic) String() string {
+	if d.Severity == SeverityWarning {
+		return fmt.Sprintf("%s:%d: warning: %s", d.File, d.Line, d.Message)
+	}
 	return fmt.Sprintf("%s:%d: %s", d.File, d.Line, d.Message)
 }
 

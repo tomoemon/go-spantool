@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -15,27 +16,40 @@ import (
 	memefishast "github.com/cloudspannerecosystem/memefish/ast"
 )
 
+type ScanOption struct {
+	NoStar bool
+}
+
 func runLintScan(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: go-spantool lint-scan <go_files...>")
+	fs := flag.NewFlagSet("lint-scan", flag.ExitOnError)
+	noStar := fs.Bool("no-star", false, "forbid SELECT * and SELECT t.* usage")
+	_ = fs.Parse(args)
+
+	if fs.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "usage: go-spantool lint-scan [-no-star] <go_files...>")
 		os.Exit(1)
 	}
 
-	diags, err := AnalyzeScanFiles(args)
+	opt := ScanOption{NoStar: *noStar}
+	diags, err := AnalyzeScanFiles(fs.Args(), opt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 
-	if len(diags) > 0 {
-		for _, d := range diags {
-			fmt.Fprintln(os.Stderr, d.String())
+	hasError := false
+	for _, d := range diags {
+		fmt.Fprintln(os.Stderr, d.String())
+		if d.Severity == SeverityError {
+			hasError = true
 		}
+	}
+	if hasError {
 		os.Exit(1)
 	}
 }
 
-func AnalyzeScanFiles(paths []string) ([]Diagnostic, error) {
+func AnalyzeScanFiles(paths []string, opt ScanOption) ([]Diagnostic, error) {
 	var allDiags []Diagnostic
 	fset := token.NewFileSet()
 	for _, path := range paths {
@@ -43,7 +57,7 @@ func AnalyzeScanFiles(paths []string) ([]Diagnostic, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", path, err)
 		}
-		diags := AnalyzeScanFile(fset, file, path)
+		diags := AnalyzeScanFile(fset, file, path, opt)
 		allDiags = append(allDiags, diags...)
 	}
 	sort.Slice(allDiags, func(i, j int) bool {
@@ -55,7 +69,7 @@ func AnalyzeScanFiles(paths []string) ([]Diagnostic, error) {
 	return allDiags, nil
 }
 
-func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string) []Diagnostic {
+func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanOption) []Diagnostic {
 	spannerIdent := spannerLocalName(file)
 	if spannerIdent == "" {
 		return nil
@@ -97,6 +111,25 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string) []Diagnos
 					Line:    pos.Line,
 					Message: fmt.Sprintf("failed to parse SQL: %v", err),
 				})
+				return true
+			}
+
+			if selInfo.hasStar {
+				pos := fset.Position(sqlPos)
+				if opt.NoStar {
+					diags = append(diags, Diagnostic{
+						File:    path,
+						Line:    pos.Line,
+						Message: "SELECT * is not allowed; explicitly list the columns to select",
+					})
+				} else {
+					diags = append(diags, Diagnostic{
+						Severity: SeverityWarning,
+						File:     path,
+						Line:     pos.Line,
+						Message:  "SELECT * skipped column count validation; use -no-star flag to forbid SELECT *",
+					})
+				}
 				return true
 			}
 
@@ -576,9 +609,6 @@ func matchColumns(selInfo *selectInfo, cbInfo *scanInfo, fset *token.FileSet, pa
 
 	switch cbInfo.mode {
 	case scanModeColumns:
-		if selInfo.hasStar {
-			return nil
-		}
 		if len(selInfo.cols) != cbInfo.argCount {
 			diags = append(diags, Diagnostic{
 				File:    path,
@@ -587,9 +617,6 @@ func matchColumns(selInfo *selectInfo, cbInfo *scanInfo, fset *token.FileSet, pa
 			})
 		}
 	case scanModeToStruct:
-		if selInfo.hasStar {
-			return nil
-		}
 		sqlLower := make(map[string]string, len(selInfo.cols))
 		sqlSet := make(map[string]bool, len(selInfo.cols))
 		for _, c := range selInfo.cols {

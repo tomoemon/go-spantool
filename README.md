@@ -107,7 +107,7 @@ Detection rules:
 - `row.ToStruct(&v)`: the struct's `spanner:"..."` tags (or field names) must match the SELECT column names
   - Type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
 - Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
-- `SELECT *` and `t.*` are skipped (column count is indeterminate without DDL)
+- `SELECT *` and `t.*` are skipped with a warning (column count is indeterminate without DDL). Use `-no-star` flag to forbid `SELECT *` usage entirely
 - Both backtick and double-quoted SQL strings are supported
 - Spanner package alias imports are supported
 - Callbacks with `_` parameter (e.g. `func(_ *spanner.Row) error`) are skipped
@@ -265,6 +265,9 @@ go tool go-spantool lint-mutation -ddl schema.sql ./path/to/*.go
 
 ```bash
 go tool go-spantool lint-scan ./path/to/*.go
+
+# Forbid SELECT * usage
+go tool go-spantool lint-scan -no-star ./path/to/*.go
 ```
 
 ### fmt-sql
