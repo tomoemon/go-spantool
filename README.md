@@ -106,7 +106,7 @@ Detection rules:
 - `row.Columns(&a, &b, &c)`: the number of arguments must match the number of SELECT columns
 - `row.ToStruct(&v)`: the struct's `spanner:"..."` tags (or field names) must match the SELECT column names
 - Column name and count only: type compatibility between Spanner types (e.g. INT64) and Go types (e.g. int64) is not checked
-  - Type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
+  - Variable and type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
 - Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
 - `SELECT *` and `t.*` are skipped with a warning (column count is indeterminate without DDL). Use `-no-star` flag to forbid `SELECT *` usage entirely
 - Both backtick and double-quoted SQL strings are supported
