@@ -724,3 +724,72 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 		t.Errorf("expected no diagnostics with strict when detectable, got %v", diags)
 	}
 }
+
+func TestScan_ToStructLocalTypeInCallback(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT MessageID, TalkID FROM Message`" + `}, func(row *spanner.Row) error {
+		type scanRow struct {
+			MessageID int64 ` + "`spanner:\"MessageID\"`" + `
+			TalkID    int64 ` + "`spanner:\"TalkID\"`" + `
+		}
+		var v scanRow
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
+	}
+}
+
+func TestScan_ToStructLocalTypeInCallbackMismatch(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT MessageID, TalkID, CreatedAt FROM Message`" + `}, func(row *spanner.Row) error {
+		type scanRow struct {
+			MessageID int64 ` + "`spanner:\"MessageID\"`" + `
+			TalkID    int64 ` + "`spanner:\"TalkID\"`" + `
+		}
+		var v scanRow
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `"CreatedAt"`) && strings.Contains(d.Message, "no corresponding struct field") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about missing struct field for CreatedAt, got %v", diags)
+	}
+}
+
+func TestScan_ToStructLocalTypeInEnclosingFunc(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	type scanRow struct {
+		MessageID int64 ` + "`spanner:\"MessageID\"`" + `
+		TalkID    int64 ` + "`spanner:\"TalkID\"`" + `
+	}
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT MessageID, TalkID FROM Message`" + `}, func(row *spanner.Row) error {
+		var v scanRow
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
+	}
+}
