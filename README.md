@@ -4,7 +4,7 @@ A static analysis and formatting tool for Google Cloud Spanner Go code.
 
 ## Motivation
 
-Many Spanner libraries rely on code generation (sqlc, yo, ent, etc.). When AI agents write code, a generate step in the middle of the workflow is costly — the agent must decide when to run it, wait for the output, and reconcile the result.
+Many Go SQL libraries rely on code generation (sqlc, yo, ent, etc.). When AI agents write code, a generate step in the middle of the workflow is costly — the agent must decide when to run it, wait for the output, and reconcile the result.
 
 go-spantool takes a different approach: work directly with the standard Go Spanner SDK (`cloud.google.com/go/spanner`) and catch mistakes through static analysis. No generate step, no extra tooling — just write code and lint.
 
