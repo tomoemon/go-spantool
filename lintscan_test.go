@@ -819,3 +819,69 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 		t.Errorf("expected no diagnostics, got %v", diags)
 	}
 }
+
+func TestScan_ToStructAnonymousStruct(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID, Username FROM User`" + `}, func(row *spanner.Row) error {
+		var v struct {
+			UserID   int64  ` + "`spanner:\"UserID\"`" + `
+			Username string ` + "`spanner:\"Username\"`" + `
+		}
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
+	}
+}
+
+func TestScan_ToStructAnonymousStructMismatch(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID, Username, Email FROM User`" + `}, func(row *spanner.Row) error {
+		var v struct {
+			UserID   int64  ` + "`spanner:\"UserID\"`" + `
+			Username string ` + "`spanner:\"Username\"`" + `
+		}
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `"Email"`) && strings.Contains(d.Message, "no corresponding struct field") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about missing struct field for Email, got %v", diags)
+	}
+}
+
+func TestScan_ToStructUnresolvableVar(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	var v myRow
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID FROM User`" + `}, func(row *spanner.Row) error {
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
+	}
+	if !strings.Contains(diags[0].Message, "variable must be declared in the callback body") {
+		t.Errorf("expected unresolvable var message, got: %s", diags[0].Message)
+	}
+}

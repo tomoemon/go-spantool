@@ -132,7 +132,7 @@ helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, 
 // => SELECT has 3 columns but row.Columns has 2 arguments
 ```
 
-Valid - ToStruct with matching tags:
+Valid - ToStruct with matching tags (named struct or anonymous struct):
 
 ```go
 type userRow struct {
@@ -142,6 +142,15 @@ type userRow struct {
 
 helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username FROM User`}, func(row *spanner.Row) error {
     var v userRow
+    return row.ToStruct(&v)
+})
+
+// Anonymous struct is also supported
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username FROM User`}, func(row *spanner.Row) error {
+    var v struct {
+        UserID   int64  `spanner:"UserID"`
+        Username string `spanner:"Username"`
+    }
     return row.ToStruct(&v)
 })
 ```
