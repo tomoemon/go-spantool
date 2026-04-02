@@ -112,6 +112,17 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string) []Diagnos
 				}
 				return true
 			}
+			if cbInfo.mode == scanModeToStructUnresolved {
+				if !hasNolintComment(file, fset, cbInfo.callPos) {
+					pos := fset.Position(cbInfo.callPos)
+					diags = append(diags, Diagnostic{
+						File:    path,
+						Line:    pos.Line,
+						Message: "row.ToStruct variable type could not be resolved; variable must be declared in the callback body (to suppress, add //nolint:spantool comment)",
+					})
+				}
+				return true
+			}
 
 			msgs := matchColumns(selInfo, cbInfo, fset, path)
 			diags = append(diags, msgs...)
@@ -239,8 +250,9 @@ func isSpannerRowType(expr ast.Expr, spannerIdent string) bool {
 }
 
 const (
-	scanModeColumns  = "columns"
-	scanModeToStruct = "toStruct"
+	scanModeColumns            = "columns"
+	scanModeToStruct           = "toStruct"
+	scanModeToStructUnresolved = "toStructUnresolved"
 )
 
 type scanInfo struct {
@@ -283,8 +295,13 @@ func analyzeFuncBody(body *ast.BlockStmt, rowName string, spannerIdent string, f
 								structTags: tags,
 								callPos:    call.Pos(),
 							}
-							return false
+						} else {
+							result = &scanInfo{
+								mode:    scanModeToStructUnresolved,
+								callPos: call.Pos(),
+							}
 						}
+						return false
 					}
 				}
 			}
