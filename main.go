@@ -14,6 +14,8 @@ func main() {
 	switch os.Args[1] {
 	case "lint-mutation":
 		runLintMutation(os.Args[2:])
+	case "lint-scan":
+		runLintScan(os.Args[2:])
 	case "fmt-sql":
 		runFmtSQL(os.Args[2:])
 	default:
@@ -28,5 +30,6 @@ func printUsage() {
 
 commands:
   lint-mutation  Validate spanner mutation map literals against DDL
+  lint-scan      Validate SELECT columns match row.Columns/ToStruct usage
   fmt-sql        Format SQL in spanner.Statement literals`)
 }
