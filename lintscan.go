@@ -104,7 +104,7 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 			}
 
 			// Check params consistency
-			diags = append(diags, matchParams(stmtInfo, fset, path)...)
+			diags = append(diags, matchParams(stmtInfo, file, fset, path)...)
 
 			if callbackFn == nil {
 				return true
@@ -175,10 +175,12 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 }
 
 type statementInfo struct {
-	sql       string
-	sqlPos    token.Pos
-	paramsKeys []string // nil means Params could not be statically resolved
-	paramsOK  bool      // true if Params was a resolvable map literal
+	sql        string
+	sqlPos     token.Pos
+	paramsKeys []string  // nil means Params could not be statically resolved
+	paramsOK   bool      // true if Params was a resolvable map literal
+	hasParams  bool      // true if Params field exists in the Statement literal
+	paramsPos  token.Pos // position of the Params field value (for nolint detection)
 }
 
 func findStatementAndCallback(call *ast.CallExpr, spannerIdent string) (stmt *statementInfo, callbackFn *ast.FuncLit, rowName string) {
@@ -237,6 +239,8 @@ func extractStatementInfo(expr ast.Expr, spannerIdent string) (*statementInfo, b
 			info.sqlPos = lit.Pos()
 			foundSQL = true
 		case "Params":
+			info.hasParams = true
+			info.paramsPos = kv.Value.Pos()
 			keys, ok := extractMapLiteralKeys(kv.Value)
 			if ok {
 				info.paramsKeys = keys
@@ -293,7 +297,18 @@ func extractSQLParams(sql string) ([]string, error) {
 	return params, nil
 }
 
-func matchParams(stmtInfo *statementInfo, fset *token.FileSet, path string) []Diagnostic {
+func matchParams(stmtInfo *statementInfo, file *ast.File, fset *token.FileSet, path string) []Diagnostic {
+	if stmtInfo.hasParams && !stmtInfo.paramsOK {
+		if !hasNolintComment(file, fset, stmtInfo.paramsPos) {
+			pos := fset.Position(stmtInfo.paramsPos)
+			return []Diagnostic{{
+				File:    path,
+				Line:    pos.Line,
+				Message: "Params must be a map literal for static analysis (to suppress, add //nolint:spantool comment)",
+			}}
+		}
+		return nil
+	}
 	if !stmtInfo.paramsOK {
 		return nil
 	}

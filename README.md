@@ -114,7 +114,7 @@ Detection rules:
 - Callbacks with `_` parameter (e.g. `func(_ *spanner.Row) error`) are skipped
 - Reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an unresolvable function). Add `//nolint:spantool` comment to suppress
 - `Params` map keys must match SQL parameters (`@param`): reports an error for missing or unused keys
-  - Only map literals are checked; variable references are skipped
+  - Only map literals are analyzed; variable references report an error. Add `//nolint:spantool` comment to suppress
   - Params checking works independently of callback detection
 
 Valid - column count matches:

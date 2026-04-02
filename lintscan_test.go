@@ -1046,7 +1046,7 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 	}
 }
 
-func TestScan_ParamsVariableSkipped(t *testing.T) {
+func TestScan_ParamsVariableError(t *testing.T) {
 	src := `package x
 import "cloud.google.com/go/spanner"
 func f() {
@@ -1062,9 +1062,36 @@ func f() {
 func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
 `
 	diags := analyzeScanSrc(t, src)
+	found := false
 	for _, d := range diags {
-		if strings.Contains(d.Message, "Params") && strings.Contains(d.Message, "@") {
-			t.Errorf("expected no param diagnostics for variable Params, got %v", diags)
+		if strings.Contains(d.Message, "Params must be a map literal") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostic about Params not being a map literal, got %v", diags)
+	}
+}
+
+func TestScan_ParamsVariableNolint(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	params := map[string]interface{}{"id": 1}
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT UserID FROM User WHERE UserID = @id`" + `,
+		Params: params, //nolint:spantool
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "Params must be a map literal") {
+			t.Errorf("expected no diagnostic with nolint comment, got %v", diags)
 		}
 	}
 }
