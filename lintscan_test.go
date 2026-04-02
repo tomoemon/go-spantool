@@ -892,8 +892,66 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 	if len(diags) != 1 {
 		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
 	}
-	if !strings.Contains(diags[0].Message, "variable must be declared in the callback body") {
+	if !strings.Contains(diags[0].Message, "ensure the variable is declared with a struct type in the callback, enclosing function, or package scope") {
 		t.Errorf("expected unresolvable var message, got: %s", diags[0].Message)
+	}
+}
+
+func TestScan_ToStructVarInEnclosingFunc_AnonymousStruct(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	var v struct {
+		UserID int64 ` + "`spanner:\"UserID\"`" + `
+	}
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID FROM User`" + `}, func(row *spanner.Row) error {
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Fatalf("expected 0 diagnostics, got %d: %v", len(diags), diags)
+	}
+}
+
+func TestScan_ToStructVarInEnclosingFunc_NamedType(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	type scanRow struct {
+		UserID int64 ` + "`spanner:\"UserID\"`" + `
+	}
+	var v scanRow
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID FROM User`" + `}, func(row *spanner.Row) error {
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Fatalf("expected 0 diagnostics, got %d: %v", len(diags), diags)
+	}
+}
+
+func TestScan_ToStructVarInPackageScope_AnonymousStruct(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+var v struct {
+	UserID int64 ` + "`spanner:\"UserID\"`" + `
+}
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID FROM User`" + `}, func(row *spanner.Row) error {
+		return row.ToStruct(&v)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Fatalf("expected 0 diagnostics, got %d: %v", len(diags), diags)
 	}
 }
 

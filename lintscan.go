@@ -158,7 +158,7 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 					diags = append(diags, Diagnostic{
 						File:    path,
 						Line:    pos.Line,
-						Message: "row.ToStruct variable type could not be resolved; variable must be declared in the callback body (to suppress, add //nolint:spantool comment)",
+						Message: "row.ToStruct variable type could not be resolved; ensure the variable is declared with a struct type in the callback, enclosing function, or package scope (to suppress, add //nolint:spantool comment)",
 					})
 				}
 				return true
@@ -522,8 +522,14 @@ func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, enclosingBody *ast.B
 		return nil
 	}
 
-	// Find the variable's type in the function body
+	// Find the variable's type: callback body -> enclosing function body -> file top-level
 	typeName, anonStruct := findVarType(body, varIdent.Name)
+	if typeName == "" && anonStruct == nil && enclosingBody != nil {
+		typeName, anonStruct = findVarType(enclosingBody, varIdent.Name)
+	}
+	if typeName == "" && anonStruct == nil {
+		typeName, anonStruct = findVarTypeInFile(file, varIdent.Name)
+	}
 	if typeName == "" && anonStruct == nil {
 		return nil
 	}
@@ -549,21 +555,8 @@ func findVarType(body *ast.BlockStmt, varName string) (string, *ast.StructType) 
 			if !ok || gd.Tok != token.VAR {
 				continue
 			}
-			for _, spec := range gd.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for _, name := range vs.Names {
-					if name.Name == varName {
-						if ident, ok := vs.Type.(*ast.Ident); ok {
-							return ident.Name, nil
-						}
-						if st, ok := vs.Type.(*ast.StructType); ok {
-							return "", st
-						}
-					}
-				}
+			if typeName, st := findVarTypeInSpecs(gd.Specs, varName); typeName != "" || st != nil {
+				return typeName, st
 			}
 		case *ast.AssignStmt:
 			if s.Tok != token.DEFINE {
@@ -578,6 +571,39 @@ func findVarType(body *ast.BlockStmt, varName string) (string, *ast.StructType) 
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+	return "", nil
+}
+
+func findVarTypeInFile(file *ast.File, varName string) (string, *ast.StructType) {
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		if typeName, st := findVarTypeInSpecs(gd.Specs, varName); typeName != "" || st != nil {
+			return typeName, st
+		}
+	}
+	return "", nil
+}
+
+func findVarTypeInSpecs(specs []ast.Spec, varName string) (string, *ast.StructType) {
+	for _, spec := range specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, name := range vs.Names {
+			if name.Name == varName {
+				if ident, ok := vs.Type.(*ast.Ident); ok {
+					return ident.Name, nil
+				}
+				if st, ok := vs.Type.(*ast.StructType); ok {
+					return "", st
 				}
 			}
 		}
