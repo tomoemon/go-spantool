@@ -9,12 +9,17 @@ import (
 
 func analyzeScanSrc(t *testing.T, src string) []Diagnostic {
 	t.Helper()
+	return analyzeScanSrcWithOpt(t, src, ScanOption{})
+}
+
+func analyzeScanSrcWithOpt(t *testing.T, src string, opt ScanOption) []Diagnostic {
+	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return AnalyzeScanFile(fset, file, "test.go")
+	return AnalyzeScanFile(fset, file, "test.go", opt)
 }
 
 func TestScan_ColumnsMatch(t *testing.T) {
@@ -212,8 +217,11 @@ func f() {
 func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
 `
 	diags := analyzeScanSrc(t, src)
-	if len(diags) != 0 {
-		t.Errorf("expected no diagnostics for SELECT *, got %v", diags)
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 warning for SELECT *, got %d: %v", len(diags), diags)
+	}
+	if diags[0].Severity != SeverityWarning {
+		t.Errorf("expected warning severity, got %v", diags[0])
 	}
 }
 
@@ -657,8 +665,11 @@ func f() {
 func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
 `
 	diags := analyzeScanSrc(t, src)
-	if len(diags) != 0 {
-		t.Errorf("expected no diagnostics for t.* (should skip like *), got %v", diags)
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 warning for t.*, got %d: %v", len(diags), diags)
+	}
+	if diags[0].Severity != SeverityWarning {
+		t.Errorf("expected warning severity, got %v", diags[0])
 	}
 }
 
@@ -883,5 +894,82 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 	}
 	if !strings.Contains(diags[0].Message, "variable must be declared in the callback body") {
 		t.Errorf("expected unresolvable var message, got: %s", diags[0].Message)
+	}
+}
+
+func TestScan_NoStarOption_Star(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT * FROM User`" + `}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrcWithOpt(t, src, ScanOption{NoStar: true})
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
+	}
+	if !strings.Contains(diags[0].Message, "SELECT * is not allowed") {
+		t.Errorf("unexpected message: %s", diags[0].Message)
+	}
+}
+
+func TestScan_NoStarOption_DotStar(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT u.* FROM User u`" + `}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrcWithOpt(t, src, ScanOption{NoStar: true})
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
+	}
+	if !strings.Contains(diags[0].Message, "SELECT * is not allowed") {
+		t.Errorf("unexpected message: %s", diags[0].Message)
+	}
+}
+
+func TestScan_NoStarOption_MixedStar(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID, * FROM User`" + `}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrcWithOpt(t, src, ScanOption{NoStar: true})
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
+	}
+	if !strings.Contains(diags[0].Message, "SELECT * is not allowed") {
+		t.Errorf("unexpected message: %s", diags[0].Message)
+	}
+}
+
+func TestScan_NoStarOption_ExplicitColumns(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID, Username FROM User`" + `}, func(row *spanner.Row) error {
+		var a, b interface{}
+		return row.Columns(&a, &b)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrcWithOpt(t, src, ScanOption{NoStar: true})
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics, got %v", diags)
 	}
 }
