@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -17,16 +16,12 @@ import (
 )
 
 func runLintScan(args []string) {
-	fs := flag.NewFlagSet("lint-scan", flag.ExitOnError)
-	strict := fs.Bool("strict", false, "report error when row.Columns/ToStruct usage cannot be detected in callback")
-	_ = fs.Parse(args)
-
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: go-spantool lint-scan [-strict] <go_files...>")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: go-spantool lint-scan <go_files...>")
 		os.Exit(1)
 	}
 
-	diags, err := AnalyzeScanFiles(fs.Args(), *strict)
+	diags, err := AnalyzeScanFiles(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
@@ -40,7 +35,7 @@ func runLintScan(args []string) {
 	}
 }
 
-func AnalyzeScanFiles(paths []string, strict bool) ([]Diagnostic, error) {
+func AnalyzeScanFiles(paths []string) ([]Diagnostic, error) {
 	var allDiags []Diagnostic
 	fset := token.NewFileSet()
 	for _, path := range paths {
@@ -48,7 +43,7 @@ func AnalyzeScanFiles(paths []string, strict bool) ([]Diagnostic, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", path, err)
 		}
-		diags := AnalyzeScanFile(fset, file, path, strict)
+		diags := AnalyzeScanFile(fset, file, path)
 		allDiags = append(allDiags, diags...)
 	}
 	sort.Slice(allDiags, func(i, j int) bool {
@@ -60,7 +55,7 @@ func AnalyzeScanFiles(paths []string, strict bool) ([]Diagnostic, error) {
 	return allDiags, nil
 }
 
-func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, strict bool) []Diagnostic {
+func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string) []Diagnostic {
 	spannerIdent := spannerLocalName(file)
 	if spannerIdent == "" {
 		return nil
@@ -107,12 +102,12 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, strict bo
 
 			cbInfo := analyzeFuncBody(callbackFn.Body, rowName, spannerIdent, file, funcDecls, 0, enclosingBody)
 			if cbInfo == nil {
-				if strict {
+				if !hasNolintComment(file, fset, callbackFn.Pos()) {
 					pos := fset.Position(callbackFn.Pos())
 					diags = append(diags, Diagnostic{
 						File:    path,
 						Line:    pos.Line,
-						Message: "could not detect row.Columns or row.ToStruct usage in callback",
+						Message: "could not detect row.Columns or row.ToStruct usage in callback (to suppress, add //nolint:spantool comment)",
 					})
 				}
 				return true
@@ -210,6 +205,9 @@ func isSpannerRowCallback(fn *ast.FuncLit, spannerIdent string) (string, bool) {
 	}
 	param := fn.Type.Params.List[0]
 	if len(param.Names) == 0 {
+		return "", false
+	}
+	if param.Names[0].Name == "_" {
 		return "", false
 	}
 	if !isSpannerRowType(param.Type, spannerIdent) {
@@ -396,6 +394,18 @@ func findVarTypeName(body *ast.BlockStmt, varName string) string {
 		}
 	}
 	return ""
+}
+
+func hasNolintComment(file *ast.File, fset *token.FileSet, pos token.Pos) bool {
+	targetLine := fset.Position(pos).Line
+	for _, cg := range file.Comments {
+		for _, c := range cg.List {
+			if fset.Position(c.Pos()).Line == targetLine && strings.Contains(c.Text, "nolint:spantool") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func extractTagsFromStructType(st *ast.StructType) []string {
