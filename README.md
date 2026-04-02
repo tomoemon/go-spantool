@@ -110,7 +110,8 @@ Detection rules:
 - `SELECT *` and `t.*` are skipped (column count is indeterminate without DDL)
 - Both backtick and double-quoted SQL strings are supported
 - Spanner package alias imports are supported
-- `-strict` mode: reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an external package function)
+- Callbacks with `_` parameter (e.g. `func(_ *spanner.Row) error`) are skipped
+- Reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an unresolvable function). Add `//nolint:spantool` comment to suppress
 
 Valid - column count matches:
 
@@ -255,9 +256,6 @@ go tool go-spantool lint-mutation -ddl schema.sql ./path/to/*.go
 
 ```bash
 go tool go-spantool lint-scan ./path/to/*.go
-
-# Strict mode: error when scan usage cannot be detected
-go tool go-spantool lint-scan -strict ./path/to/*.go
 ```
 
 ### fmt-sql

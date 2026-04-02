@@ -9,17 +9,12 @@ import (
 
 func analyzeScanSrc(t *testing.T, src string) []Diagnostic {
 	t.Helper()
-	return analyzeScanSrcStrict(t, src, false)
-}
-
-func analyzeScanSrcStrict(t *testing.T, src string, strict bool) []Diagnostic {
-	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "test.go", src, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return AnalyzeScanFile(fset, file, "test.go", strict)
+	return AnalyzeScanFile(fset, file, "test.go")
 }
 
 func TestScan_ColumnsMatch(t *testing.T) {
@@ -684,7 +679,7 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 	}
 }
 
-func TestScan_StrictUndetectable(t *testing.T) {
+func TestScan_Undetectable(t *testing.T) {
 	src := `package x
 import "cloud.google.com/go/spanner"
 func f() {
@@ -695,20 +690,51 @@ func f() {
 func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
 `
 	diags := analyzeScanSrc(t, src)
-	if len(diags) != 0 {
-		t.Errorf("expected no diagnostics without strict, got %v", diags)
-	}
-
-	diags = analyzeScanSrcStrict(t, src, true)
 	if len(diags) != 1 {
-		t.Fatalf("expected 1 diagnostic with strict, got %d: %v", len(diags), diags)
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
 	}
 	if !strings.Contains(diags[0].Message, "could not detect") {
 		t.Errorf("unexpected message: %s", diags[0].Message)
 	}
+	if !strings.Contains(diags[0].Message, "nolint:spantool") {
+		t.Errorf("expected nolint hint in message: %s", diags[0].Message)
+	}
 }
 
-func TestScan_StrictDetectable(t *testing.T) {
+func TestScan_UndetectableNolint(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT UserID, Username FROM User`" + `}, func(row *spanner.Row) error { //nolint:spantool
+		return externalPkg.Process(row)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics with nolint, got %v", diags)
+	}
+}
+
+func TestScan_BlankParamCallback(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{SQL: ` + "`SELECT 1 FROM UserBlock WHERE UserID = @userID`" + `}, func(_ *spanner.Row) error {
+		found = true
+		return nil
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics for blank param callback, got %v", diags)
+	}
+}
+
+func TestScan_Detectable(t *testing.T) {
 	src := `package x
 import "cloud.google.com/go/spanner"
 func f() {
@@ -719,9 +745,9 @@ func f() {
 }
 func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
 `
-	diags := analyzeScanSrcStrict(t, src, true)
+	diags := analyzeScanSrc(t, src)
 	if len(diags) != 0 {
-		t.Errorf("expected no diagnostics with strict when detectable, got %v", diags)
+		t.Errorf("expected no diagnostics when detectable, got %v", diags)
 	}
 }
 
