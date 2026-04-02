@@ -2,6 +2,12 @@
 
 A static analysis and formatting tool for Google Cloud Spanner Go code.
 
+## Overview
+
+- [lint-mutation](#lint-mutation) - Validate mutation map literals against DDL schema
+- [lint-scan](#lint-scan) - Detect mismatches between SELECT columns and `row.Columns` / `row.ToStruct`
+- [fmt-sql](#fmt-sql) - Auto-format SQL in `spanner.Statement{SQL: ...}` literals
+
 ## Features
 
 ### lint-mutation
@@ -83,6 +89,90 @@ spanner.InsertMap("User", m)
 // => spanner.InsertMap("User", ...): second argument must be a map[string]any literal
 ```
 
+### lint-scan
+
+Validates that SELECT columns in `spanner.Statement{SQL: ...}` match the scan usage in the associated `func(*spanner.Row) error` callback.
+
+Detection targets any function call whose arguments contain both a `spanner.Statement{SQL: ...}` literal and a `func(*spanner.Row) error` callback:
+
+```go
+anyHelper(ctx, spanner.Statement{SQL: `SELECT A, B, C FROM ...`}, func(row *spanner.Row) error {
+    // row.Columns, row.ToStruct, or a scan helper function
+})
+```
+
+Detection rules:
+
+- `row.Columns(&a, &b, &c)`: the number of arguments must match the number of SELECT columns
+- `row.ToStruct(&v)`: the struct's `spanner:"..."` tags (or field names) must match the SELECT column names
+- Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
+- `SELECT *` and `t.*` are skipped (column count is indeterminate without DDL)
+- Both backtick and double-quoted SQL strings are supported
+- Spanner package alias imports are supported
+- `-strict` mode: reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an external package function)
+
+Valid - column count matches:
+
+```go
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, func(row *spanner.Row) error {
+    var a, b, c interface{}
+    return row.Columns(&a, &b, &c)
+})
+```
+
+Error - column count mismatch:
+
+```go
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, func(row *spanner.Row) error {
+    var a, b interface{}
+    return row.Columns(&a, &b)
+})
+// => SELECT has 3 columns but row.Columns has 2 arguments
+```
+
+Valid - ToStruct with matching tags:
+
+```go
+type userRow struct {
+    UserID   int64  `spanner:"UserID"`
+    Username string `spanner:"Username"`
+}
+
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username FROM User`}, func(row *spanner.Row) error {
+    var v userRow
+    return row.ToStruct(&v)
+})
+```
+
+Error - struct has a field not in SELECT:
+
+```go
+type userRow struct {
+    UserID   int64  `spanner:"UserID"`
+    Username string `spanner:"Username"`
+    Extra    string `spanner:"Extra"`
+}
+
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username FROM User`}, func(row *spanner.Row) error {
+    var v userRow
+    return row.ToStruct(&v)
+})
+// => struct field "Extra" has no corresponding SELECT column
+```
+
+Valid - scan helper function resolution:
+
+```go
+func scanUser(row *spanner.Row) error {
+    var a, b, c interface{}
+    return row.Columns(&a, &b, &c)
+}
+
+helper(ctx, spanner.Statement{SQL: `SELECT UserID, Username, Email FROM User`}, func(row *spanner.Row) error {
+    return scanUser(row)
+})
+```
+
 ### fmt-sql
 
 Formats SQL inside `spanner.Statement{SQL: ...}` literals in Go source files.
@@ -158,6 +248,15 @@ go get -tool github.com/tomoemon/go-spantool@latest
 
 ```bash
 go tool go-spantool lint-mutation -ddl schema.sql ./path/to/*.go
+```
+
+### lint-scan
+
+```bash
+go tool go-spantool lint-scan ./path/to/*.go
+
+# Strict mode: error when scan usage cannot be detected
+go tool go-spantool lint-scan -strict ./path/to/*.go
 ```
 
 ### fmt-sql
