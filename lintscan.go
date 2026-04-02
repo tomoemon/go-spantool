@@ -98,14 +98,21 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 				return true
 			}
 
-			sqlStr, sqlPos, callbackFn, rowName := findStatementAndCallback(call, spannerIdent)
-			if sqlStr == "" || callbackFn == nil {
+			stmtInfo, callbackFn, rowName := findStatementAndCallback(call, spannerIdent)
+			if stmtInfo == nil {
 				return true
 			}
 
-			selInfo, err := extractSelectInfo(sqlStr)
+			// Check params consistency
+			diags = append(diags, matchParams(stmtInfo, fset, path)...)
+
+			if callbackFn == nil {
+				return true
+			}
+
+			selInfo, err := extractSelectInfo(stmtInfo.sql)
 			if err != nil {
-				pos := fset.Position(sqlPos)
+				pos := fset.Position(stmtInfo.sqlPos)
 				diags = append(diags, Diagnostic{
 					File:    path,
 					Line:    pos.Line,
@@ -115,7 +122,7 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 			}
 
 			if selInfo.hasStar {
-				pos := fset.Position(sqlPos)
+				pos := fset.Position(stmtInfo.sqlPos)
 				if opt.NoStar {
 					diags = append(diags, Diagnostic{
 						File:    path,
@@ -167,12 +174,18 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 	return diags
 }
 
-func findStatementAndCallback(call *ast.CallExpr, spannerIdent string) (sqlStr string, sqlPos token.Pos, callbackFn *ast.FuncLit, rowName string) {
+type statementInfo struct {
+	sql       string
+	sqlPos    token.Pos
+	paramsKeys []string // nil means Params could not be statically resolved
+	paramsOK  bool      // true if Params was a resolvable map literal
+}
+
+func findStatementAndCallback(call *ast.CallExpr, spannerIdent string) (stmt *statementInfo, callbackFn *ast.FuncLit, rowName string) {
 	for _, arg := range call.Args {
-		if sqlStr == "" {
-			if s, pos, ok := extractStatementSQL(arg, spannerIdent); ok {
-				sqlStr = s
-				sqlPos = pos
+		if stmt == nil {
+			if info, ok := extractStatementInfo(arg, spannerIdent); ok {
+				stmt = info
 			}
 		}
 		if callbackFn == nil {
@@ -185,40 +198,145 @@ func findStatementAndCallback(call *ast.CallExpr, spannerIdent string) (sqlStr s
 	return
 }
 
-func extractStatementSQL(expr ast.Expr, spannerIdent string) (string, token.Pos, bool) {
+func extractStatementInfo(expr ast.Expr, spannerIdent string) (*statementInfo, bool) {
 	comp, ok := expr.(*ast.CompositeLit)
 	if !ok {
-		return "", 0, false
+		return nil, false
 	}
 	sel, ok := comp.Type.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Statement" {
-		return "", 0, false
+		return nil, false
 	}
 	ident, ok := sel.X.(*ast.Ident)
 	if !ok || ident.Name != spannerIdent {
-		return "", 0, false
+		return nil, false
 	}
 
+	info := &statementInfo{}
+	foundSQL := false
 	for _, elt := range comp.Elts {
 		kv, ok := elt.(*ast.KeyValueExpr)
 		if !ok {
 			continue
 		}
 		key, ok := kv.Key.(*ast.Ident)
-		if !ok || key.Name != "SQL" {
+		if !ok {
 			continue
 		}
-		lit, ok := kv.Value.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			continue
+		switch key.Name {
+		case "SQL":
+			lit, ok := kv.Value.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			sql, err := unquoteStringLit(lit.Value)
+			if err != nil {
+				continue
+			}
+			info.sql = sql
+			info.sqlPos = lit.Pos()
+			foundSQL = true
+		case "Params":
+			keys, ok := extractMapLiteralKeys(kv.Value)
+			if ok {
+				info.paramsKeys = keys
+				info.paramsOK = true
+			}
 		}
-		sql, err := unquoteStringLit(lit.Value)
-		if err != nil {
-			continue
-		}
-		return sql, lit.Pos(), true
 	}
-	return "", 0, false
+	if !foundSQL {
+		return nil, false
+	}
+	return info, true
+}
+
+func extractMapLiteralKeys(expr ast.Expr) ([]string, bool) {
+	comp, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return nil, false
+	}
+	var keys []string
+	for _, elt := range comp.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		lit, ok := kv.Key.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return nil, false
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return nil, false
+		}
+		keys = append(keys, s)
+	}
+	return keys, true
+}
+
+func extractSQLParams(sql string) ([]string, error) {
+	stmt, err := memefish.ParseStatement("", sql)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var params []string
+	memefishast.Inspect(stmt, func(n memefishast.Node) bool {
+		if p, ok := n.(*memefishast.Param); ok {
+			if !seen[p.Name] {
+				seen[p.Name] = true
+				params = append(params, p.Name)
+			}
+		}
+		return true
+	})
+	return params, nil
+}
+
+func matchParams(stmtInfo *statementInfo, fset *token.FileSet, path string) []Diagnostic {
+	if !stmtInfo.paramsOK {
+		return nil
+	}
+
+	sqlParams, err := extractSQLParams(stmtInfo.sql)
+	if err != nil {
+		// SQL parse errors are reported elsewhere
+		return nil
+	}
+
+	pos := fset.Position(stmtInfo.sqlPos)
+
+	var diags []Diagnostic
+
+	paramsSet := make(map[string]bool, len(stmtInfo.paramsKeys))
+	for _, k := range stmtInfo.paramsKeys {
+		paramsSet[k] = true
+	}
+	sqlParamsSet := make(map[string]bool, len(sqlParams))
+	for _, p := range sqlParams {
+		sqlParamsSet[p] = true
+	}
+
+	for _, p := range sqlParams {
+		if !paramsSet[p] {
+			diags = append(diags, Diagnostic{
+				File:    path,
+				Line:    pos.Line,
+				Message: fmt.Sprintf("SQL parameter @%s is used in SQL but not provided in Params map", p),
+			})
+		}
+	}
+	for _, k := range stmtInfo.paramsKeys {
+		if !sqlParamsSet[k] {
+			diags = append(diags, Diagnostic{
+				File:    path,
+				Line:    pos.Line,
+				Message: fmt.Sprintf("Params key %q is not referenced in SQL", k),
+			})
+		}
+	}
+
+	return diags
 }
 
 func unquoteStringLit(raw string) (string, error) {
