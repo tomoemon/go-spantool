@@ -77,46 +77,53 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, strict bo
 	}
 
 	var diags []Diagnostic
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
 		}
+		enclosingBody := fd.Body
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
 
-		sqlStr, sqlPos, callbackFn, rowName := findStatementAndCallback(call, spannerIdent)
-		if sqlStr == "" || callbackFn == nil {
-			return true
-		}
+			sqlStr, sqlPos, callbackFn, rowName := findStatementAndCallback(call, spannerIdent)
+			if sqlStr == "" || callbackFn == nil {
+				return true
+			}
 
-		selInfo, err := extractSelectInfo(sqlStr)
-		if err != nil {
-			pos := fset.Position(sqlPos)
-			diags = append(diags, Diagnostic{
-				File:    path,
-				Line:    pos.Line,
-				Message: fmt.Sprintf("failed to parse SQL: %v", err),
-			})
-			return true
-		}
-
-		cbInfo := analyzeFuncBody(callbackFn.Body, rowName, spannerIdent, file, funcDecls, 0)
-		if cbInfo == nil {
-			if strict {
-				pos := fset.Position(callbackFn.Pos())
+			selInfo, err := extractSelectInfo(sqlStr)
+			if err != nil {
+				pos := fset.Position(sqlPos)
 				diags = append(diags, Diagnostic{
 					File:    path,
 					Line:    pos.Line,
-					Message: "could not detect row.Columns or row.ToStruct usage in callback",
+					Message: fmt.Sprintf("failed to parse SQL: %v", err),
 				})
+				return true
 			}
+
+			cbInfo := analyzeFuncBody(callbackFn.Body, rowName, spannerIdent, file, funcDecls, 0, enclosingBody)
+			if cbInfo == nil {
+				if strict {
+					pos := fset.Position(callbackFn.Pos())
+					diags = append(diags, Diagnostic{
+						File:    path,
+						Line:    pos.Line,
+						Message: "could not detect row.Columns or row.ToStruct usage in callback",
+					})
+				}
+				return true
+			}
+
+			msgs := matchColumns(selInfo, cbInfo, fset, path)
+			diags = append(diags, msgs...)
+
 			return true
-		}
-
-		msgs := matchColumns(selInfo, cbInfo, fset, path)
-		diags = append(diags, msgs...)
-
-		return true
-	})
+		})
+	}
 
 	return diags
 }
@@ -247,7 +254,7 @@ type scanInfo struct {
 
 const maxScanDepth = 3
 
-func analyzeFuncBody(body *ast.BlockStmt, rowName string, spannerIdent string, file *ast.File, funcDecls map[string]*ast.FuncDecl, depth int) *scanInfo {
+func analyzeFuncBody(body *ast.BlockStmt, rowName string, spannerIdent string, file *ast.File, funcDecls map[string]*ast.FuncDecl, depth int, enclosingBody *ast.BlockStmt) *scanInfo {
 	var result *scanInfo
 	ast.Inspect(body, func(n ast.Node) bool {
 		if result != nil {
@@ -271,7 +278,7 @@ func analyzeFuncBody(body *ast.BlockStmt, rowName string, spannerIdent string, f
 					return false
 				case "ToStruct":
 					if len(call.Args) == 1 {
-						tags := resolveToStructTags(call.Args[0], body, file)
+						tags := resolveToStructTags(call.Args[0], body, enclosingBody, file)
 						if tags != nil {
 							result = &scanInfo{
 								mode:       scanModeToStruct,
@@ -293,7 +300,7 @@ func analyzeFuncBody(body *ast.BlockStmt, rowName string, spannerIdent string, f
 						if fd, exists := funcDecls[funcIdent.Name]; exists {
 							innerRowName := findRowParamName(fd, spannerIdent)
 							if innerRowName != "" {
-								info := analyzeFuncBody(fd.Body, innerRowName, spannerIdent, file, funcDecls, depth+1)
+								info := analyzeFuncBody(fd.Body, innerRowName, spannerIdent, file, funcDecls, depth+1, enclosingBody)
 								if info != nil {
 									result = info
 									return false
@@ -323,7 +330,7 @@ func findRowParamName(fd *ast.FuncDecl, spannerIdent string) string {
 	return ""
 }
 
-func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, file *ast.File) []string {
+func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, enclosingBody *ast.BlockStmt, file *ast.File) []string {
 	// arg should be &v (UnaryExpr with AND)
 	unary, ok := arg.(*ast.UnaryExpr)
 	if !ok || unary.Op != token.AND {
@@ -340,6 +347,13 @@ func resolveToStructTags(arg ast.Expr, body *ast.BlockStmt, file *ast.File) []st
 		return nil
 	}
 
+	// Search order: callback body -> enclosing function body -> file top-level
+	if tags := extractStructSpannerTagsFromBlock(body, typeName); tags != nil {
+		return tags
+	}
+	if tags := extractStructSpannerTagsFromBlock(enclosingBody, typeName); tags != nil {
+		return tags
+	}
 	return extractStructSpannerTags(file, typeName)
 }
 
@@ -384,6 +398,56 @@ func findVarTypeName(body *ast.BlockStmt, varName string) string {
 	return ""
 }
 
+func extractTagsFromStructType(st *ast.StructType) []string {
+	var tags []string
+	for _, field := range st.Fields.List {
+		if field.Tag != nil {
+			tagStr, err := strconv.Unquote(field.Tag.Value)
+			if err != nil {
+				continue
+			}
+			spannerTag := reflect.StructTag(tagStr).Get("spanner")
+			if spannerTag != "" && spannerTag != "-" {
+				tags = append(tags, spannerTag)
+				continue
+			}
+		}
+		// Fallback to field name
+		for _, name := range field.Names {
+			tags = append(tags, name.Name)
+		}
+	}
+	return tags
+}
+
+func extractStructSpannerTagsFromBlock(body *ast.BlockStmt, typeName string) []string {
+	if body == nil {
+		return nil
+	}
+	for _, stmt := range body.List {
+		ds, ok := stmt.(*ast.DeclStmt)
+		if !ok {
+			continue
+		}
+		gd, ok := ds.Decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != typeName {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			return extractTagsFromStructType(st)
+		}
+	}
+	return nil
+}
+
 func extractStructSpannerTags(file *ast.File, typeName string) []string {
 	for _, decl := range file.Decls {
 		gd, ok := decl.(*ast.GenDecl)
@@ -399,25 +463,7 @@ func extractStructSpannerTags(file *ast.File, typeName string) []string {
 			if !ok {
 				continue
 			}
-			var tags []string
-			for _, field := range st.Fields.List {
-				if field.Tag != nil {
-					tagStr, err := strconv.Unquote(field.Tag.Value)
-					if err != nil {
-						continue
-					}
-					spannerTag := reflect.StructTag(tagStr).Get("spanner")
-					if spannerTag != "" && spannerTag != "-" {
-						tags = append(tags, spannerTag)
-						continue
-					}
-				}
-				// Fallback to field name
-				for _, name := range field.Names {
-					tags = append(tags, name.Name)
-				}
-			}
-			return tags
+			return extractTagsFromStructType(st)
 		}
 	}
 	return nil

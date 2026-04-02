@@ -105,6 +105,7 @@ Detection rules:
 
 - `row.Columns(&a, &b, &c)`: the number of arguments must match the number of SELECT columns
 - `row.ToStruct(&v)`: the struct's `spanner:"..."` tags (or field names) must match the SELECT column names
+  - Type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
 - Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
 - `SELECT *` and `t.*` are skipped (column count is indeterminate without DDL)
 - Both backtick and double-quoted SQL strings are supported
