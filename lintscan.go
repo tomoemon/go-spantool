@@ -147,7 +147,7 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 					diags = append(diags, Diagnostic{
 						File:    path,
 						Line:    pos.Line,
-						Message: "could not detect row.Columns or row.ToStruct usage in callback (to suppress, add //nolint:spantool comment)",
+						Message: "could not detect row.Columns or row.ToStruct usage in callback (to suppress, add //nolint:spantool comment to this line)",
 					})
 				}
 				return true
@@ -158,7 +158,7 @@ func AnalyzeScanFile(fset *token.FileSet, file *ast.File, path string, opt ScanO
 					diags = append(diags, Diagnostic{
 						File:    path,
 						Line:    pos.Line,
-						Message: "row.ToStruct variable type could not be resolved; ensure the variable is declared with a struct type in the callback, enclosing function, or package scope (to suppress, add //nolint:spantool comment)",
+						Message: "row.ToStruct variable type could not be resolved; ensure the variable is declared with a struct type in the callback, enclosing function, or package scope (to suppress, add //nolint:spantool comment to this line)",
 					})
 				}
 				return true
@@ -304,7 +304,7 @@ func matchParams(stmtInfo *statementInfo, file *ast.File, fset *token.FileSet, p
 			return []Diagnostic{{
 				File:    path,
 				Line:    pos.Line,
-				Message: "Params must be a map literal for static analysis (to suppress, add //nolint:spantool comment)",
+				Message: "Params must be a map literal for static analysis (to suppress, add //nolint:spantool comment to this line)",
 			}}
 		}
 		return nil
