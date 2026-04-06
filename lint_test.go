@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"go/parser"
 	"go/token"
 	"os"
@@ -261,6 +262,105 @@ func f() []*spanner.Mutation {
 	}
 	if !strings.Contains(diags[0].Message, "table name must be a string literal") {
 		t.Errorf("unexpected message: %s", diags[0].Message)
+	}
+}
+
+func TestAnalyzer_UpdateCompositePK_AllPresent(t *testing.T) {
+	schema := testSchema(t)
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() []*spanner.Mutation {
+	return []*spanner.Mutation{
+		spanner.UpdateMap("OrderItem", map[string]any{
+			"OrderID":  int64(1),
+			"ItemID":   int64(2),
+			"Quantity": int64(3),
+		}),
+	}
+}
+`
+	diags := analyzeSrc(t, schema, src)
+	if len(diags) != 0 {
+		t.Errorf("expected no diagnostics when all composite PK columns present, got %v", diags)
+	}
+}
+
+func TestAnalyzer_UpdateCompositePK_PartialMissing(t *testing.T) {
+	schema := testSchema(t)
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() []*spanner.Mutation {
+	return []*spanner.Mutation{
+		spanner.UpdateMap("OrderItem", map[string]any{
+			"OrderID":  int64(1),
+			"Quantity": int64(3),
+		}),
+	}
+}
+`
+	diags := analyzeSrc(t, schema, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `missing primary key column "ItemID"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected missing primary key diagnostic for ItemID, got %v", diags)
+	}
+}
+
+func TestAnalyzer_UpdateCompositePK_AllMissing(t *testing.T) {
+	schema := testSchema(t)
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() []*spanner.Mutation {
+	return []*spanner.Mutation{
+		spanner.UpdateMap("OrderItem", map[string]any{
+			"Quantity": int64(3),
+		}),
+	}
+}
+`
+	diags := analyzeSrc(t, schema, src)
+	missingPKs := map[string]bool{}
+	for _, d := range diags {
+		for _, pk := range []string{"OrderID", "ItemID"} {
+			if strings.Contains(d.Message, fmt.Sprintf("missing primary key column %q", pk)) {
+				missingPKs[pk] = true
+			}
+		}
+	}
+	for _, pk := range []string{"OrderID", "ItemID"} {
+		if !missingPKs[pk] {
+			t.Errorf("expected missing primary key diagnostic for %q, got %v", pk, diags)
+		}
+	}
+}
+
+func TestAnalyzer_InsertCompositePK_MissingOne(t *testing.T) {
+	schema := testSchema(t)
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() []*spanner.Mutation {
+	return []*spanner.Mutation{
+		spanner.InsertMap("OrderItem", map[string]any{
+			"OrderID":  int64(1),
+			"Quantity": int64(3),
+			"Price":    1.5,
+		}),
+	}
+}
+`
+	diags := analyzeSrc(t, schema, src)
+	found := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, `missing required NOT NULL column "ItemID"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected missing required column diagnostic for ItemID, got %v", diags)
 	}
 }
 
