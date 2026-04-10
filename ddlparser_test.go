@@ -16,10 +16,10 @@ func TestParseDDL(t *testing.T) {
 	}
 
 	t.Run("tables parsed", func(t *testing.T) {
-		if len(schema.Tables) != 3 {
-			t.Fatalf("got %d tables, want 3", len(schema.Tables))
+		if len(schema.Tables) != 4 {
+			t.Fatalf("got %d tables, want 4", len(schema.Tables))
 		}
-		for _, name := range []string{"User", "SearchDoc", "WithDefault"} {
+		for _, name := range []string{"User", "SearchDoc", "WithDefault", "OrderItem"} {
 			if _, ok := schema.Tables[name]; !ok {
 				t.Errorf("missing table %q", name)
 			}

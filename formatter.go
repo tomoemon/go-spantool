@@ -167,6 +167,7 @@ func formatTokens(tokens []tok) string {
 	inSelectList := false
 	inWhere := false
 	suppressSpace := false
+	hintDepth := 0
 
 	var caseStack []int
 	var subStack []subqueryCtx
@@ -190,6 +191,36 @@ func formatTokens(tokens []tok) string {
 		}
 
 		u := upper(t)
+
+		// Hint block `@{...}`: memefish splits it into separate tokens,
+		// so reassemble without spaces. `@<param>` query parameters are
+		// a single token, so `@` + `{` unambiguously introduces a hint.
+		if hintDepth > 0 {
+			switch string(t.kind) {
+			case "}":
+				b.WriteString("}")
+				hintDepth--
+				suppressSpace = false
+			case ",":
+				b.WriteString(", ")
+				suppressSpace = true
+			default:
+				b.WriteString(t.raw)
+				suppressSpace = true
+			}
+			continue
+		}
+		if string(t.kind) == "@" && i+1 < len(tokens) && string(tokens[i+1].kind) == "{" {
+			b.WriteString("@")
+			suppressSpace = true
+			continue
+		}
+		if string(t.kind) == "{" && i > 0 && string(tokens[prevNonSkipped(tokens, i, skip)].kind) == "@" {
+			b.WriteString("{")
+			hintDepth++
+			suppressSpace = true
+			continue
+		}
 
 		// --- ( : increment depth + detect subquery ---
 		if string(t.kind) == "(" {

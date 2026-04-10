@@ -285,6 +285,51 @@ WHERE
       active = TRUE
   )`,
 		},
+		{
+			name:  "table hint FORCE_INDEX",
+			input: `SELECT * FROM Singers@{FORCE_INDEX=SingersByName} WHERE SingerId = @id`,
+			want: `SELECT
+  *
+FROM
+  Singers@{FORCE_INDEX=SingersByName}
+WHERE
+  SingerId = @id`,
+		},
+		{
+			name:  "table hint with whitespace in source",
+			input: `SELECT * FROM Singers @ { FORCE_INDEX = SingersByName }`,
+			want: `SELECT
+  *
+FROM
+  Singers@{FORCE_INDEX=SingersByName}`,
+		},
+		{
+			name:  "table hint multiple records",
+			input: `SELECT * FROM Singers@{FORCE_INDEX=Idx1, JOIN_METHOD=HASH_JOIN}`,
+			want: `SELECT
+  *
+FROM
+  Singers@{FORCE_INDEX=Idx1, JOIN_METHOD=HASH_JOIN}`,
+		},
+		{
+			name:  "statement hint preserves casing",
+			input: `@{use_additional_parallelism=true} SELECT * FROM Singers`,
+			want: `@{use_additional_parallelism=true}
+SELECT
+  *
+FROM
+  Singers`,
+		},
+		{
+			name:  "join hint",
+			input: `SELECT * FROM A JOIN @{JOIN_METHOD=HASH_JOIN} B ON A.id = B.id`,
+			want: `SELECT
+  *
+FROM
+  A
+JOIN
+  @{JOIN_METHOD=HASH_JOIN} B ON A.id = B.id`,
+		},
 	}
 
 	for _, tt := range tests {
