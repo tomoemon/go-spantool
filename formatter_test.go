@@ -673,10 +673,7 @@ WHERE
 FROM
   t
 WHERE
-  (
-    a
-    AND b
-  ) = TRUE`,
+  (a AND b) = TRUE`,
 		},
 		{
 			name:  "cross join",
@@ -750,14 +747,11 @@ WHERE
 			name:  "IF with AND in select list and WHERE",
 			input: `SELECT IF(a AND b, 1, 0) AS v FROM t WHERE IF(a AND b, TRUE, FALSE)`,
 			want: `SELECT
-  IF (a AND b, 1, 0) AS v
+  IF(a AND b, 1, 0) AS v
 FROM
   t
 WHERE
-  IF (
-    a
-    AND b, TRUE, FALSE
-  )`,
+  IF(a AND b, TRUE, FALSE)`,
 		},
 		{
 			name:  "EXISTS subquery after AND",
