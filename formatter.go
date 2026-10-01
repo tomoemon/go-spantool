@@ -47,6 +47,7 @@ func verifyEquivalent(orig ast.Statement, formatted string) error {
 type tok struct {
 	kind     token.TokenKind
 	raw      string
+	pos      token.Pos
 	comments []token.TokenComment
 }
 
@@ -65,6 +66,7 @@ func tokenize(sql string) ([]tok, error) {
 		tokens = append(tokens, tok{
 			kind:     lex.Token.Kind,
 			raw:      lex.Token.Raw,
+			pos:      lex.Token.Pos,
 			comments: lex.Token.Comments,
 		})
 	}
