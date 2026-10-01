@@ -492,6 +492,420 @@ INTO
 VALUES
   (1, 2) ON CONFLICT ON UNIQUE CONSTRAINT foo_x DO NOTHING`,
 		},
+		{
+			name:  "insert values",
+			input: `INSERT INTO Singers (SingerId, Name) VALUES (1, 'a'), (2, 'b')`,
+			want: `INSERT
+INTO
+  Singers(SingerId, Name)
+VALUES
+  (1, 'a'), (2, 'b')`,
+		},
+		{
+			name:  "insert select",
+			input: `INSERT INTO Singers (SingerId, Name) SELECT SingerId, Name FROM Tmp WHERE x = 1`,
+			want: `INSERT
+INTO
+  Singers(SingerId, Name)
+SELECT
+  SingerId,
+  Name
+FROM
+  Tmp
+WHERE
+  x = 1`,
+		},
+		{
+			name:  "insert or update",
+			input: `INSERT OR UPDATE INTO Singers (SingerId) VALUES (1)`,
+			want: `INSERT OR UPDATE
+INTO
+  Singers(SingerId)
+VALUES
+  (1)`,
+		},
+		{
+			name:  "update set where",
+			input: `UPDATE Singers SET Name = @name, Age = 3 WHERE SingerId = @id AND Age > 1`,
+			want: `UPDATE Singers
+SET
+  Name = @name, Age = 3
+WHERE
+  SingerId = @id
+  AND Age > 1`,
+		},
+		{
+			name:  "delete where",
+			input: `DELETE FROM Singers WHERE SingerId = @id`,
+			want: `DELETE
+FROM
+  Singers
+WHERE
+  SingerId = @id`,
+		},
+		{
+			name:  "update then return",
+			input: `UPDATE Singers SET Name = 'x' WHERE TRUE THEN RETURN SingerId, Name`,
+			want: `UPDATE Singers
+SET
+  Name = 'x'
+WHERE
+  TRUE THEN RETURN SingerId, Name`,
+		},
+		{
+			name:  "group by having",
+			input: `SELECT UserID, COUNT(*) AS cnt FROM Post GROUP BY UserID HAVING COUNT(*) > 1 AND MAX(Score) < 10`,
+			want: `SELECT
+  UserID,
+  COUNT(*) AS cnt
+FROM
+  Post
+GROUP BY
+  UserID
+HAVING
+  COUNT(*) > 1
+  AND MAX(Score) < 10`,
+		},
+		{
+			name:  "array subquery in select list",
+			input: `SELECT ARRAY(SELECT Name FROM Tag WHERE Tag.PostID = p.PostID) AS Tags FROM Post p`,
+			want: `SELECT
+  ARRAY(
+    SELECT
+      Name
+    FROM
+      Tag
+    WHERE
+      Tag.PostID = p.PostID
+  ) AS Tags
+FROM
+  Post p`,
+		},
+		{
+			name:  "scalar subquery in select list",
+			input: `SELECT p.ID, (SELECT COUNT(*) FROM Comment c WHERE c.PostID = p.ID) AS cnt FROM Post p`,
+			want: `SELECT
+  p.ID,
+  (
+    SELECT
+      COUNT(*)
+    FROM
+      Comment c
+    WHERE
+      c.PostID = p.ID
+  ) AS cnt
+FROM
+  Post p`,
+		},
+		{
+			name:  "nested conditional parens",
+			input: `SELECT * FROM t WHERE a = 1 AND (b = 2 OR (c = 3 AND d = 4))`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  a = 1
+  AND (
+    b = 2
+    OR (
+      c = 3
+      AND d = 4
+    )
+  )`,
+		},
+		{
+			name:  "NOT conditional paren",
+			input: `SELECT * FROM t WHERE NOT (a = 1 OR b = 2)`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  NOT (
+    a = 1
+    OR b = 2
+  )`,
+		},
+		{
+			name:  "set operation in FROM subquery",
+			input: `SELECT * FROM (SELECT a FROM t1 UNION ALL SELECT a FROM t2) AS u WHERE a > 0`,
+			want: `SELECT
+  *
+FROM
+  (
+    SELECT
+      a
+    FROM
+      t1
+
+    UNION ALL
+    SELECT
+      a
+    FROM
+      t2
+  ) AS u
+WHERE
+  a > 0`,
+		},
+		{
+			name:  "CASE in WHERE",
+			input: `SELECT * FROM t WHERE CASE WHEN a = 1 THEN TRUE ELSE FALSE END AND b = 2`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  CASE
+    WHEN a = 1 THEN TRUE
+    ELSE FALSE
+  END
+  AND b = 2`,
+		},
+		{
+			name:  "parenthesized AND compared to value",
+			input: `SELECT * FROM t WHERE (a AND b) = TRUE`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  (
+    a
+    AND b
+  ) = TRUE`,
+		},
+		{
+			name:  "cross join",
+			input: `SELECT * FROM t1 CROSS JOIN t2`,
+			want: `SELECT
+  *
+FROM
+  t1
+CROSS JOIN
+  t2`,
+		},
+		{
+			name:  "full outer join using",
+			input: `SELECT * FROM a FULL OUTER JOIN b USING (id)`,
+			want: `SELECT
+  *
+FROM
+  a
+FULL OUTER JOIN
+  b USING (id)`,
+		},
+		{
+			name:  "comma join",
+			input: `SELECT * FROM t1, t2 WHERE t1.id = t2.id`,
+			want: `SELECT
+  *
+FROM
+  t1, t2
+WHERE
+  t1.id = t2.id`,
+		},
+		{
+			name:  "select distinct",
+			input: `SELECT DISTINCT a FROM t`,
+			want: `SELECT
+  DISTINCT a
+FROM
+  t`,
+		},
+		{
+			name:  "intersect distinct",
+			input: `SELECT a FROM t1 INTERSECT DISTINCT SELECT a FROM t2`,
+			want: `SELECT
+  a
+FROM
+  t1
+
+INTERSECT DISTINCT
+SELECT
+  a
+FROM
+  t2`,
+		},
+		{
+			name:  "IN subquery and IN UNNEST",
+			input: `SELECT a FROM t WHERE x IN (SELECT y FROM u) AND z IN UNNEST(@zs)`,
+			want: `SELECT
+  a
+FROM
+  t
+WHERE
+  x IN (
+    SELECT
+      y
+    FROM
+      u
+  )
+  AND z IN UNNEST(@zs)`,
+		},
+		{
+			name:  "IF with AND in select list and WHERE",
+			input: `SELECT IF(a AND b, 1, 0) AS v FROM t WHERE IF(a AND b, TRUE, FALSE)`,
+			want: `SELECT
+  IF (a AND b, 1, 0) AS v
+FROM
+  t
+WHERE
+  IF (
+    a
+    AND b, TRUE, FALSE
+  )`,
+		},
+		{
+			name:  "EXISTS subquery after AND",
+			input: `SELECT * FROM t WHERE a = 1 AND EXISTS (SELECT 1 FROM u WHERE u.x = t.x)`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  a = 1
+  AND EXISTS (
+    SELECT
+      1
+    FROM
+      u
+    WHERE
+      u.x = t.x
+  )`,
+		},
+		{
+			name:  "join subquery",
+			input: `SELECT * FROM t JOIN (SELECT id FROM u) AS s ON s.id = t.id`,
+			want: `SELECT
+  *
+FROM
+  t
+JOIN
+  (
+    SELECT
+      id
+    FROM
+      u
+  ) AS s
+ON
+  s.id = t.id`,
+		},
+		{
+			name:  "parenthesized join",
+			input: `SELECT * FROM (a JOIN b ON a.id = b.id) JOIN c ON c.id = a.id`,
+			want: `SELECT
+  *
+FROM
+  (a JOIN b ON a.id = b.id)
+JOIN
+  c
+ON
+  c.id = a.id`,
+		},
+		{
+			name:  "ON with conditional paren",
+			input: `SELECT * FROM a JOIN b ON a.id = b.id AND (b.x = 1 OR b.y = 2)`,
+			want: `SELECT
+  *
+FROM
+  a
+JOIN
+  b
+ON
+  a.id = b.id
+  AND (
+    b.x = 1
+    OR b.y = 2
+  )`,
+		},
+		{
+			name:  "ORDER BY and LIMIT in subquery",
+			input: `SELECT * FROM (SELECT a FROM t ORDER BY a LIMIT 1) AS s`,
+			want: `SELECT
+  *
+FROM
+  (
+    SELECT
+      a
+    FROM
+      t
+    ORDER BY
+      a
+    LIMIT
+      1
+  ) AS s`,
+		},
+		{
+			name:  "CTE with set operation",
+			input: `WITH a AS (SELECT 1 AS x) SELECT x FROM a UNION ALL SELECT x FROM a`,
+			want: `WITH a AS (
+  SELECT
+    1 AS x
+)
+SELECT
+  x
+FROM
+  a
+
+UNION ALL
+SELECT
+  x
+FROM
+  a`,
+		},
+		{
+			name:  "mixed AND OR precedence",
+			input: `SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  a = 1
+  OR b = 2
+  AND c = 3`,
+		},
+		{
+			name:  "delete then return",
+			input: `DELETE FROM Singers WHERE SingerId = 1 THEN RETURN SingerId`,
+			want: `DELETE
+FROM
+  Singers
+WHERE
+  SingerId = 1 THEN RETURN SingerId`,
+		},
+		{
+			name:  "table hint with IN list",
+			input: `SELECT * FROM t@{FORCE_INDEX=Idx} WHERE a IN (1, 2) AND b = @b`,
+			want: `SELECT
+  *
+FROM
+  t@{FORCE_INDEX=Idx}
+WHERE
+  a IN (1, 2)
+  AND b = @b`,
+		},
+		{
+			name:  "IN subquery with AND followed by ORDER BY",
+			input: `SELECT a FROM t WHERE b IN (SELECT b FROM u WHERE c = 1 AND d = 2) ORDER BY a`,
+			want: `SELECT
+  a
+FROM
+  t
+WHERE
+  b IN (
+    SELECT
+      b
+    FROM
+      u
+    WHERE
+      c = 1
+      AND d = 2
+  )
+ORDER BY
+  a`,
+		},
 	}
 
 	for _, tt := range tests {
