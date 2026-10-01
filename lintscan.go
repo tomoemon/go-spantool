@@ -227,16 +227,14 @@ func extractStatementInfo(expr ast.Expr, spannerIdent string) (*statementInfo, b
 		}
 		switch key.Name {
 		case "SQL":
-			lit, ok := kv.Value.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			sql, err := unquoteStringLit(lit.Value)
+			// A string literal, or string literals joined with + (needed for
+			// backtick-quoted identifiers, which a raw string cannot contain)
+			sql, err := concatStringLits(kv.Value)
 			if err != nil {
 				continue
 			}
 			info.sql = sql
-			info.sqlPos = lit.Pos()
+			info.sqlPos = kv.Value.Pos()
 			foundSQL = true
 		case "Params":
 			info.hasParams = true

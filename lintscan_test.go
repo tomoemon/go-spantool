@@ -262,6 +262,51 @@ func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error
 	}
 }
 
+func TestScan_ConcatenatedSQL(t *testing.T) {
+	// A table named like a reserved keyword must be backtick-quoted, which
+	// needs string literals joined with +
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: ` + "`SELECT FromUserID, ToUserID FROM ` + \"`Following`\" + ` WHERE FromUserID = @fromUserID`" + `,
+		Params: map[string]interface{}{"fromUserID": 1},
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnostic, got %d: %v", len(diags), diags)
+	}
+	if !strings.Contains(diags[0].Message, "2 columns") || !strings.Contains(diags[0].Message, "1 arguments") {
+		t.Errorf("unexpected message: %s", diags[0].Message)
+	}
+}
+
+func TestScan_ConcatenatedSQLParams(t *testing.T) {
+	src := `package x
+import "cloud.google.com/go/spanner"
+func f() {
+	helper(ctx, spanner.Statement{
+		SQL: "SELECT FromUserID FROM " + "` + "`Following`" + `" + " WHERE FromUserID = @fromUserID",
+		Params: map[string]interface{}{"userID": 1},
+	}, func(row *spanner.Row) error {
+		var a interface{}
+		return row.Columns(&a)
+	})
+}
+func helper(ctx interface{}, stmt spanner.Statement, fn func(*spanner.Row) error) {}
+`
+	diags := analyzeScanSrc(t, src)
+	if len(diags) != 2 {
+		t.Fatalf("expected 2 diagnostics (missing @fromUserID, unused userID), got %d: %v", len(diags), diags)
+	}
+}
+
 func TestScan_JoinWithAlias(t *testing.T) {
 	src := `package x
 import "cloud.google.com/go/spanner"

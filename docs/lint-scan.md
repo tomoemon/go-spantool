@@ -20,7 +20,7 @@ anyHelper(ctx, spanner.Statement{SQL: `SELECT A, B, C FROM ...`}, func(row *span
   - Variable and type resolution scope: callback body -> enclosing function body -> same file top-level declarations (other files in the same package are not searched)
 - Scan helper functions (e.g. `scanUser(row)`) are resolved within the same file and analyzed recursively
 - `SELECT *` and `t.*` are skipped with a warning (column count is indeterminate without DDL). Use `-no-star` flag to forbid `SELECT *` usage entirely
-- Both backtick and double-quoted SQL strings are supported
+- Both backtick and double-quoted SQL strings are supported, as are string literals joined with `+` (e.g. `` `SELECT * FROM ` + "`Following`" ``)
 - Spanner package alias imports are supported
 - Callbacks with `_` parameter (e.g. `func(_ *spanner.Row) error`) are skipped
 - Reports an error when `row.Columns` / `row.ToStruct` usage cannot be detected in the callback (e.g. row is passed to an unresolvable function). Add `//nolint:spantool` comment to suppress
