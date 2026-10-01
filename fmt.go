@@ -8,7 +8,6 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"go/types"
 	"os"
 	"strconv"
 	"strings"
@@ -85,39 +84,30 @@ func formatGoFile(src []byte) ([]byte, error) {
 		return src, nil
 	}
 
-	result := make([]byte, len(src))
-	copy(result, src)
-	offset := 0
+	// fields are in source order, so the result is built in one pass
+	var result bytes.Buffer
+	prev := 0
 	var syntaxErrors []string
 
 	for _, f := range fields {
+		start := fset.Position(f.expr.Pos())
 		formatted, fmtErr := FormatSQL(strings.TrimSpace(f.sql))
 		if fmtErr != nil {
-			pos := fset.Position(f.expr.Pos())
-			syntaxErrors = append(syntaxErrors, fmt.Sprintf("  line %d: %v", pos.Line, fmtErr))
+			syntaxErrors = append(syntaxErrors, fmt.Sprintf("  line %d: %v", start.Line, fmtErr))
 			continue
 		}
-
-		start := fset.Position(f.expr.Pos()).Offset + offset
-		end := fset.Position(f.expr.End()).Offset + offset
-		newLit := sqlFieldExpr(formatted)
-		if newLit == string(result[start:end]) {
-			continue
-		}
-
-		newResult := make([]byte, len(result[:start])+len(newLit)+len(result[end:]))
-		copy(newResult, result[:start])
-		copy(newResult[start:], newLit)
-		copy(newResult[start+len(newLit):], result[end:])
-		offset += len(newLit) - (end - start)
-		result = newResult
+		end := fset.Position(f.expr.End()).Offset
+		result.Write(src[prev:start.Offset])
+		result.WriteString(sqlFieldExpr(formatted))
+		prev = end
 	}
+	result.Write(src[prev:])
 
 	if len(syntaxErrors) > 0 {
 		return nil, fmt.Errorf("SQL syntax errors:\n%s", strings.Join(syntaxErrors, "\n"))
 	}
 
-	return format.Source(result)
+	return format.Source(result.Bytes())
 }
 
 // sqlField is the SQL field of a spanner.Statement literal.
@@ -133,17 +123,8 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 	var fields []sqlField
 	var errs []string
 	ast.Inspect(file, func(n ast.Node) bool {
-		comp, ok := n.(*ast.CompositeLit)
+		comp, ok := spannerStatementLit(n, spannerIdent)
 		if !ok {
-			return true
-		}
-
-		sel, ok := comp.Type.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Statement" {
-			return true
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != spannerIdent {
 			return true
 		}
 
@@ -177,39 +158,6 @@ func evalSQLField(expr ast.Expr) (string, error) {
 		return "", fmt.Errorf("found double-quoted string literal %s; use a backtick string literal", lit.Value)
 	}
 	return concatStringLits(expr)
-}
-
-// concatStringLits returns the value of string literals joined with +.
-func concatStringLits(expr ast.Expr) (string, error) {
-	switch e := expr.(type) {
-	case *ast.BasicLit:
-		if e.Kind == token.STRING {
-			return unquoteStringLit(e.Value)
-		}
-	case *ast.BinaryExpr:
-		if e.Op == token.ADD {
-			x, err := concatStringLits(e.X)
-			if err != nil {
-				return "", err
-			}
-			y, err := concatStringLits(e.Y)
-			if err != nil {
-				return "", err
-			}
-			return x + y, nil
-		}
-	}
-	return "", fmt.Errorf("found %s", describeExpr(expr))
-}
-
-func describeExpr(expr ast.Expr) string {
-	switch expr.(type) {
-	case *ast.Ident:
-		return "variable " + types.ExprString(expr)
-	case *ast.CallExpr:
-		return "function call " + types.ExprString(expr)
-	}
-	return "expression " + types.ExprString(expr)
 }
 
 // sqlFieldExpr returns the Go expression for an SQL field holding sql: a

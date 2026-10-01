@@ -201,16 +201,8 @@ func findStatementAndCallback(call *ast.CallExpr, spannerIdent string) (stmt *st
 }
 
 func extractStatementInfo(expr ast.Expr, spannerIdent string) (*statementInfo, bool) {
-	comp, ok := expr.(*ast.CompositeLit)
+	comp, ok := spannerStatementLit(expr, spannerIdent)
 	if !ok {
-		return nil, false
-	}
-	sel, ok := comp.Type.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Statement" {
-		return nil, false
-	}
-	ident, ok := sel.X.(*ast.Ident)
-	if !ok || ident.Name != spannerIdent {
 		return nil, false
 	}
 
@@ -350,16 +342,6 @@ func matchParams(stmtInfo *statementInfo, file *ast.File, fset *token.FileSet, p
 	}
 
 	return diags
-}
-
-func unquoteStringLit(raw string) (string, error) {
-	if len(raw) < 2 {
-		return "", fmt.Errorf("invalid string literal")
-	}
-	if raw[0] == '`' {
-		return raw[1 : len(raw)-1], nil
-	}
-	return strconv.Unquote(raw)
 }
 
 func extractRowCallback(expr ast.Expr, spannerIdent string) (*ast.FuncLit, string, bool) {

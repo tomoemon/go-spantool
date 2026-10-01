@@ -81,7 +81,7 @@ var _ = spanner.Statement{SQL: ` + "`SELECT 1`" + `}
 }
 
 func TestFormatGoFile_concatenatedSQL(t *testing.T) {
-	bt := "`"
+	// ‵ stands for a backtick, which a raw string cannot contain
 	tests := []struct {
 		name string
 		src  string
@@ -94,7 +94,7 @@ func TestFormatGoFile_concatenatedSQL(t *testing.T) {
 import "cloud.google.com/go/spanner"
 
 var stmt = spanner.Statement{
-	SQL: ` + bt + `select FromUserID from ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + ` where FromUserID = @fromUserID` + bt + `,
+	SQL: ‵select FromUserID from ‵ + "‵Following‵" + ‵ where FromUserID = @fromUserID‵,
 }
 `,
 			want: `package x
@@ -102,14 +102,14 @@ var stmt = spanner.Statement{
 import "cloud.google.com/go/spanner"
 
 var stmt = spanner.Statement{
-	SQL: ` + bt + `
+	SQL: ‵
 SELECT
   FromUserID
 FROM
-  ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + `
+  ‵ + "‵Following‵" + ‵
 WHERE
   FromUserID = @fromUserID
-` + bt + `,
+‵,
 }
 `,
 		},
@@ -125,12 +125,12 @@ var stmt = spanner.Statement{SQL: "SELECT a " + "FROM t"}
 
 import "cloud.google.com/go/spanner"
 
-var stmt = spanner.Statement{SQL: ` + bt + `
+var stmt = spanner.Statement{SQL: ‵
 SELECT
   a
 FROM
   t
-` + bt + `}
+‵}
 `,
 		},
 		{
@@ -139,30 +139,32 @@ FROM
 
 import "cloud.google.com/go/spanner"
 
-var stmt = spanner.Statement{SQL: "SELECT f." + "` + bt + `Order` + bt + `" + " FROM " + "` + bt + `Following` + bt + `" + " f"}
+var stmt = spanner.Statement{SQL: "SELECT f." + "‵Order‵" + " FROM " + "‵Following‵" + " f"}
 `,
 			want: `package x
 
 import "cloud.google.com/go/spanner"
 
-var stmt = spanner.Statement{SQL: ` + bt + `
+var stmt = spanner.Statement{SQL: ‵
 SELECT
-  f.` + bt + ` + "` + bt + `Order` + bt + `" + ` + bt + `
+  f.‵ + "‵Order‵" + ‵
 FROM
-  ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + ` f
-` + bt + `}
+  ‵ + "‵Following‵" + ‵ f
+‵}
 `,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := formatGoFile([]byte(tt.src))
+			src := strings.ReplaceAll(tt.src, "‵", "`")
+			want := strings.ReplaceAll(tt.want, "‵", "`")
+			got, err := formatGoFile([]byte(src))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if string(got) != tt.want {
-				t.Fatalf("mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, tt.want)
+			if string(got) != want {
+				t.Fatalf("mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 			}
 			again, err := formatGoFile(got)
 			if err != nil {
