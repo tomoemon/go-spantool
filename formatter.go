@@ -105,7 +105,7 @@ func needsSpace(prev, cur tok) bool {
 		return false
 	}
 	// Array subscript: no space before [ following an operand
-	if string(cur.kind) == "[" && (prev.kind == token.TokenIdent || string(prev.kind) == ")" || string(prev.kind) == "]") {
+	if string(cur.kind) == "[" && (prev.kind == token.TokenIdent || prev.kind == token.TokenParam || string(prev.kind) == ")" || string(prev.kind) == "]") {
 		return false
 	}
 	return true
@@ -420,8 +420,8 @@ func formatTokens(tokens []tok) string {
 			continue
 		}
 
-		// WHERE AND/OR (excluding inside CASE)
-		if inWhere && len(caseStack) == 0 && (isKeywordLike(t, "AND") || isKeywordLike(t, "OR")) {
+		// WHERE AND/OR (excluding inside CASE and `BETWEEN x AND y`)
+		if inWhere && len(caseStack) == 0 && (isKeywordLike(t, "AND") || isKeywordLike(t, "OR")) && !isBetweenAnd(tokens, i) {
 			andOrIndent := bodyIndent + effectiveDepth()*2
 			b.WriteString("\n")
 			b.WriteString(ind(andOrIndent))
@@ -450,16 +450,9 @@ func currentLineIndent(b *strings.Builder) int {
 }
 
 // isCTEStart reports whether tokens[i] is the WITH that starts a CTE list
-// (`WITH [RECURSIVE] name AS (`), as opposed to e.g. `WITH OFFSET`.
+// (`WITH name AS (`), as opposed to e.g. `WITH OFFSET`.
 func isCTEStart(tokens []tok, i int) bool {
-	if !isKeywordLike(tokens[i], "WITH") {
-		return false
-	}
-	j := i + 1
-	if j < len(tokens) && isKeywordLike(tokens[j], "RECURSIVE") {
-		j++
-	}
-	return isCTEHead(tokens, j)
+	return isKeywordLike(tokens[i], "WITH") && isCTEHead(tokens, i+1)
 }
 
 // isCTEHead reports whether tokens[j:] starts with `name AS (`.
@@ -560,8 +553,8 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
-	// Regular clause keywords
-	if clauseKeywords[u] {
+	// Regular clause keywords (ON only as a JOIN condition, not `ON CONFLICT`)
+	if clauseKeywords[u] && (u != "ON" || isJoinOn(tokens, i)) {
 		switch u {
 		case "SELECT":
 			*inSelectList = true
@@ -609,6 +602,45 @@ func inLimitClause(tokens []tok, i int) bool {
 		}
 		if d == 0 && clauseKeywords[upper(tokens[j])] {
 			return upper(tokens[j]) == "LIMIT"
+		}
+	}
+	return false
+}
+
+// isJoinOn reports whether the ON at tokens[i] introduces a JOIN condition,
+// as opposed to `ON CONFLICT` or `ON UNIQUE CONSTRAINT` in INSERT.
+func isJoinOn(tokens []tok, i int) bool {
+	if i+1 < len(tokens) && (isKeywordLike(tokens[i+1], "CONFLICT") || isKeywordLike(tokens[i+1], "UNIQUE")) {
+		return false
+	}
+	return true
+}
+
+// isBetweenAnd reports whether the AND at tokens[i] belongs to
+// `BETWEEN x AND y`, by scanning back at the same parenthesis depth.
+func isBetweenAnd(tokens []tok, i int) bool {
+	if !isKeywordLike(tokens[i], "AND") {
+		return false
+	}
+	d := 0
+	for j := i - 1; j >= 0; j-- {
+		switch string(tokens[j].kind) {
+		case ")", "]":
+			d++
+		case "(", "[":
+			if d == 0 {
+				return false
+			}
+			d--
+		}
+		if d != 0 {
+			continue
+		}
+		if isKeywordLike(tokens[j], "BETWEEN") {
+			return true
+		}
+		if isKeywordLike(tokens[j], "AND") || isKeywordLike(tokens[j], "OR") || clauseKeywords[upper(tokens[j])] {
+			return false
 		}
 	}
 	return false

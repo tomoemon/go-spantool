@@ -459,6 +459,39 @@ FROM
 WHERE
   a = [1, 2]`,
 		},
+		{
+			name:  "parameter array subscript",
+			input: `SELECT @arr[OFFSET(0)] AS x FROM t`,
+			want: `SELECT
+  @arr[OFFSET(0)] AS x
+FROM
+  t`,
+		},
+		{
+			name:  "BETWEEN AND stays on one line in ON and WHERE",
+			input: `SELECT a FROM A JOIN B ON A.d BETWEEN B.s AND B.e AND A.x = B.x WHERE A.n BETWEEN 1 AND 10 OR A.m = 0`,
+			want: `SELECT
+  a
+FROM
+  A
+JOIN
+  B
+ON
+  A.d BETWEEN B.s AND B.e
+  AND A.x = B.x
+WHERE
+  A.n BETWEEN 1 AND 10
+  OR A.m = 0`,
+		},
+		{
+			name:  "INSERT ON CONFLICT is not a JOIN ON",
+			input: `INSERT INTO foo (x, y) VALUES (1, 2) ON CONFLICT ON UNIQUE CONSTRAINT foo_x DO NOTHING`,
+			want: `INSERT
+INTO
+  foo(x, y)
+VALUES
+  (1, 2) ON CONFLICT ON UNIQUE CONSTRAINT foo_x DO NOTHING`,
+		},
 	}
 
 	for _, tt := range tests {
