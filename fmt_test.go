@@ -17,7 +17,7 @@ func TestFormatGoFile_rejectNonLiteralSQL(t *testing.T) {
 import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: sql}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: "line 3: found variable sql",
 		},
 		{
 			name: "function call",
@@ -25,7 +25,7 @@ var _ = spanner.Statement{SQL: sql}
 import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: buildSQL()}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: "line 3: found function call buildSQL()",
 		},
 		{
 			name: "double-quoted string is rejected",
@@ -33,7 +33,23 @@ var _ = spanner.Statement{SQL: buildSQL()}
 import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: "SELECT 1"}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: `line 3: found double-quoted string literal "SELECT 1"`,
+		},
+		{
+			name: "concatenation with a variable is rejected",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: "SELECT * FROM " + table}
+`,
+			wantErr: "line 3: found variable table",
+		},
+		{
+			name: "concatenation with a function call is rejected",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + fmt.Sprintf("%s", t)}
+`,
+			wantErr: `line 3: found function call fmt.Sprintf("%s", t)`,
 		},
 		{
 			name: "backtick literal is accepted",
@@ -59,6 +75,101 @@ var _ = spanner.Statement{SQL: ` + "`SELECT 1`" + `}
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFormatGoFile_concatenatedSQL(t *testing.T) {
+	bt := "`"
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "backtick-quoted identifier is kept as a double-quoted literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{
+	SQL: ` + bt + `select FromUserID from ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + ` where FromUserID = @fromUserID` + bt + `,
+}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{
+	SQL: ` + bt + `
+SELECT
+  FromUserID
+FROM
+  ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + `
+WHERE
+  FromUserID = @fromUserID
+` + bt + `,
+}
+`,
+		},
+		{
+			name: "string literals without backtick-quoted identifiers become one literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT a " + "FROM t"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ` + bt + `
+SELECT
+  a
+FROM
+  t
+` + bt + `}
+`,
+		},
+		{
+			name: "several backtick-quoted identifiers",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT f." + "` + bt + `Order` + bt + `" + " FROM " + "` + bt + `Following` + bt + `" + " f"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ` + bt + `
+SELECT
+  f.` + bt + ` + "` + bt + `Order` + bt + `" + ` + bt + `
+FROM
+  ` + bt + ` + "` + bt + `Following` + bt + `" + ` + bt + ` f
+` + bt + `}
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := formatGoFile([]byte(tt.src))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, tt.want)
+			}
+			again, err := formatGoFile(got)
+			if err != nil {
+				t.Fatalf("unexpected error on formatted source: %v", err)
+			}
+			if string(again) != string(got) {
+				t.Errorf("not idempotent:\n%s", again)
 			}
 		})
 	}

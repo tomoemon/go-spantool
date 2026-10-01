@@ -62,11 +62,25 @@ SQL must be a backtick string literal:
 spanner.Statement{SQL: `SELECT 1`}  // accepted
 ```
 
-Double-quoted strings and variables are not supported:
+A raw string cannot contain a backtick, so to write a backtick-quoted identifier (e.g. a table named like a reserved keyword), join string literals with `+`. When rewriting, fmt-sql writes backtick-quoted identifiers as double-quoted literals and the rest as raw string literals:
 
 ```go
-spanner.Statement{SQL: "SELECT 1"}   // rejected: must be a backtick string literal
-spanner.Statement{SQL: buildSQL()}   // rejected: must be a backtick string literal
+spanner.Statement{SQL: `
+SELECT
+  FromUserID
+FROM
+  ` + "`Following`" + `
+WHERE
+  FromUserID = @fromUserID
+`}  // accepted
+```
+
+A single double-quoted string, and expressions that are not string literals (variables, function calls), are not supported, so that SQL is never built at run time:
+
+```go
+spanner.Statement{SQL: "SELECT 1"}                  // rejected: found double-quoted string literal
+spanner.Statement{SQL: buildSQL()}                  // rejected: found function call buildSQL()
+spanner.Statement{SQL: "SELECT * FROM " + table}    // rejected: found variable table
 ```
 
 Graph queries (`GRAPH ... MATCH ...`) are kept as written.
