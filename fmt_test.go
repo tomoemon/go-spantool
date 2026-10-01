@@ -52,6 +52,23 @@ var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + fmt.Sprintf("%s", t)
 			wantErr: `line 3: found function call fmt.Sprintf("%s", t)`,
 		},
 		{
+			name: "double-quoted string with a backtick-quoted identifier is rejected",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: "SELECT * FROM ` + "`Following`" + `"}
+`,
+			wantErr: "a backtick string literal cannot contain a backtick, so join string literals with +",
+		},
+		{
+			name: "comment inside joined string literals is rejected, not dropped",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
+	"` + "`Following`" + `"}
+`,
+			wantErr: "line 3: found // reserved word",
+		},
+		{
 			name: "backtick literal is accepted",
 			src: `package x
 import "cloud.google.com/go/spanner"
@@ -150,6 +167,50 @@ SELECT
   f.‵ + "‵Order‵" + ‵
 FROM
   ‵ + "‵Following‵" + ‵ f
+‵}
+`,
+		},
+		{
+			name: "characters a raw string cannot hold are kept as double-quoted literals",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT 'a\rb', 'c\x00d' FROM " + "‵Following‵"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  'a‵ + "\r" + ‵b',
+  'c‵ + "\x00" + ‵d'
+FROM
+  ‵ + "‵Following‵" + ‵
+‵}
+`,
+		},
+		{
+			name: "statement nested in a field before SQL",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{Params: f(spanner.Statement{SQL: ‵select 2‵}), SQL: ‵select 1 from ‵ + "‵Order‵"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{Params: f(spanner.Statement{SQL: ‵
+SELECT
+  2
+‵}), SQL: ‵
+SELECT
+  1
+FROM
+  ‵ + "‵Order‵" + ‵
 ‵}
 `,
 		},

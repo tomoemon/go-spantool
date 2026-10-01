@@ -9,8 +9,10 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func runFmtSQL(args []string) {
@@ -83,8 +85,21 @@ func formatGoFile(src []byte) ([]byte, error) {
 	if len(fields) == 0 {
 		return src, nil
 	}
+	var commentErrors []string
+	for _, f := range fields {
+		if c := commentInExpr(file, f.expr); c != nil {
+			commentErrors = append(commentErrors, fmt.Sprintf("  line %d: found %s", fset.Position(c.Pos()).Line, c.Text))
+		}
+	}
+	if len(commentErrors) > 0 {
+		return nil, fmt.Errorf("comments inside a spanner.Statement SQL field would be dropped when rewriting it; "+
+			"move them outside the SQL field, or into the SQL as -- comments:\n%s", strings.Join(commentErrors, "\n"))
+	}
 
-	// fields are in source order, so the result is built in one pass
+	// Sort fields into source order so the result is built in one pass;
+	// ast.Inspect visits a statement nested in an earlier field (e.g. Params)
+	// after the enclosing statement's SQL field
+	slices.SortFunc(fields, func(a, b sqlField) int { return int(a.expr.Pos() - b.expr.Pos()) })
 	var result bytes.Buffer
 	prev := 0
 	var syntaxErrors []string
@@ -155,20 +170,36 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 // backtick string literal or string literals joined with +.
 func evalSQLField(expr ast.Expr) (string, error) {
 	if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value[0] != '`' {
+		if strings.Contains(lit.Value, "`") {
+			return "", fmt.Errorf("found double-quoted string literal %s; a backtick string literal cannot contain a backtick, "+
+				"so join string literals with + (e.g. `SELECT * FROM ` + \"`Following`\")", lit.Value)
+		}
 		return "", fmt.Errorf("found double-quoted string literal %s; use a backtick string literal", lit.Value)
 	}
 	return concatStringLits(expr)
 }
 
+// commentInExpr returns the first comment inside expr, or nil. Rewriting
+// expr would drop it.
+func commentInExpr(file *ast.File, expr ast.Expr) *ast.Comment {
+	for _, cg := range file.Comments {
+		if cg.Pos() > expr.Pos() && cg.End() < expr.End() {
+			return cg.List[0]
+		}
+	}
+	return nil
+}
+
 // sqlFieldExpr returns the Go expression for an SQL field holding sql: a
 // backtick string literal starting and ending with a newline. A raw string
 // cannot contain a backtick, so backtick-quoted parts such as `Following` are
-// written as double-quoted string literals joined with +.
+// written as double-quoted string literals joined with +, as are other
+// characters a raw string cannot hold as is (see indexNotRaw).
 func sqlFieldExpr(sql string) string {
 	text := "\n" + sql + "\n"
 	var parts []string
 	for {
-		i := strings.IndexByte(text, '`')
+		i, size := indexNotRaw(text)
 		if i < 0 {
 			return strings.Join(append(parts, "`"+text+"`"), " + ")
 		}
@@ -177,11 +208,28 @@ func sqlFieldExpr(sql string) string {
 		}
 		// A backtick-quoted identifier ends on the same line; a lone
 		// backtick (e.g. in a comment) is written by itself
-		quoted := "`"
-		if j := strings.IndexAny(text[i+1:], "`\n"); j >= 0 && text[i+1+j] == '`' {
+		quoted := text[i : i+size]
+		if j := strings.IndexAny(text[i+1:], "`\n"); text[i] == '`' && j >= 0 && text[i+1+j] == '`' {
 			quoted = text[i : i+j+2]
 		}
 		parts = append(parts, strconv.Quote(quoted))
 		text = text[i+len(quoted):]
 	}
+}
+
+// indexNotRaw returns the index and size of the first character in s that a
+// raw string literal cannot hold as is, or -1: a backtick, a carriage return
+// (dropped from raw strings), NUL, a byte order mark, or invalid UTF-8.
+func indexNotRaw(s string) (int, int) {
+	for i, r := range s {
+		switch r {
+		case '`', '\r', 0, '\uFEFF':
+			return i, utf8.RuneLen(r)
+		case utf8.RuneError:
+			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
+				return i, 1
+			}
+		}
+	}
+	return -1, 0
 }
