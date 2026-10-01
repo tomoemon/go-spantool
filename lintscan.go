@@ -219,8 +219,7 @@ func extractStatementInfo(expr ast.Expr, spannerIdent string) (*statementInfo, b
 		}
 		switch key.Name {
 		case "SQL":
-			// A string literal, or string literals joined with + (needed for
-			// backtick-quoted identifiers, which a raw string cannot contain)
+			// A string literal, or string literals joined with +
 			sql, err := concatStringLits(kv.Value)
 			if err != nil {
 				continue

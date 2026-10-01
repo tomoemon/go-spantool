@@ -50,7 +50,18 @@ import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
 	"` + "`Following`" + `"}
 `,
-			wantErr: "line 3: found // reserved word",
+			wantErr: "line 3: found Go comment // reserved word",
+		},
+		{
+			name: "all problems are reported together",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: sql}
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
+	"` + "`Following`" + `"}
+`,
+			wantErr: "line 3: found variable sql; the SQL field must be a string literal or string literals joined with +, " +
+				"since SQL built at run time is not supported\n  line 4: found Go comment // reserved word",
 		},
 		{
 			name: "backtick literal is accepted",

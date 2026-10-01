@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -70,35 +71,23 @@ func formatGoFile(src []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Collect SQL fields from spanner.Statement{SQL: `...`} literals
+	// Collect SQL fields from spanner.Statement{SQL: ...} literals
 	spannerIdent := spannerLocalName(file)
 	if spannerIdent == "" {
 		return src, nil
 	}
 	fields, fieldErrors := collectSpannerSQLFields(fset, file, spannerIdent)
 	if len(fieldErrors) > 0 {
-		return nil, fmt.Errorf("spanner.Statement SQL field must be a string literal or string literals joined with +; "+
-			"SQL built at run time is not supported, so write the SQL itself in the field:\n%s",
-			strings.Join(fieldErrors, "\n"))
+		return nil, fmt.Errorf("cannot format spanner.Statement SQL fields:\n%s", strings.Join(fieldErrors, "\n"))
 	}
 	if len(fields) == 0 {
 		return src, nil
-	}
-	var commentErrors []string
-	for _, f := range fields {
-		if c := commentInExpr(file, f.expr); c != nil {
-			commentErrors = append(commentErrors, fmt.Sprintf("  line %d: found %s", fset.Position(c.Pos()).Line, c.Text))
-		}
-	}
-	if len(commentErrors) > 0 {
-		return nil, fmt.Errorf("comments inside a spanner.Statement SQL field would be dropped when rewriting it; "+
-			"move them outside the SQL field, or into the SQL as -- comments:\n%s", strings.Join(commentErrors, "\n"))
 	}
 
 	// Sort fields into source order so the result is built in one pass;
 	// ast.Inspect visits a statement nested in an earlier field (e.g. Params)
 	// after the enclosing statement's SQL field
-	slices.SortFunc(fields, func(a, b sqlField) int { return int(a.expr.Pos() - b.expr.Pos()) })
+	slices.SortFunc(fields, func(a, b sqlField) int { return cmp.Compare(a.expr.Pos(), b.expr.Pos()) })
 	var result bytes.Buffer
 	prev := 0
 	var syntaxErrors []string
@@ -110,9 +99,13 @@ func formatGoFile(src []byte) ([]byte, error) {
 			syntaxErrors = append(syntaxErrors, fmt.Sprintf("  line %d: %v", start.Line, fmtErr))
 			continue
 		}
+		newExpr := sqlFieldExpr(formatted)
+		if err := verifySQLFieldExpr(newExpr, formatted); err != nil {
+			return nil, fmt.Errorf("line %d: %w", start.Line, err)
+		}
 		end := fset.Position(f.expr.End()).Offset
 		result.Write(src[prev:start.Offset])
-		result.WriteString(sqlFieldExpr(formatted))
+		result.WriteString(newExpr)
 		prev = end
 	}
 	result.Write(src[prev:])
@@ -153,8 +146,14 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 			}
 			sql, err := concatStringLits(kv.Value)
 			if err != nil {
-				pos := fset.Position(kv.Value.Pos())
-				errs = append(errs, fmt.Sprintf("  line %d: %v", pos.Line, err))
+				errs = append(errs, fmt.Sprintf("  line %d: %v; the SQL field must be a string literal or string literals joined with +, "+
+					"since SQL built at run time is not supported", fset.Position(kv.Value.Pos()).Line, err))
+				continue
+			}
+			if c := commentInExpr(file, kv.Value); c != nil {
+				errs = append(errs, fmt.Sprintf("  line %d: found Go comment %s between the joined string literals; "+
+					"rewriting the field would drop it, so move it outside the field or into the SQL as a -- comment",
+					fset.Position(c.Pos()).Line, c.Text))
 				continue
 			}
 			fields = append(fields, sqlField{expr: kv.Value, sql: sql})
@@ -195,8 +194,10 @@ func sqlFieldExpr(sql string) string {
 		// A backtick-quoted identifier ends on the same line; a lone
 		// backtick (e.g. in a comment) is written by itself
 		quoted := text[i : i+size]
-		if j := strings.IndexAny(text[i+1:], "`\n"); text[i] == '`' && j >= 0 && text[i+1+j] == '`' {
-			quoted = text[i : i+j+2]
+		if text[i] == '`' {
+			if j := strings.IndexAny(text[i+1:], "`\n"); j >= 0 && text[i+1+j] == '`' {
+				quoted = text[i : i+j+2]
+			}
 		}
 		parts = append(parts, strconv.Quote(quoted))
 		text = text[i+len(quoted):]
@@ -207,15 +208,27 @@ func sqlFieldExpr(sql string) string {
 // raw string literal cannot hold as is, or -1: a backtick, a carriage return
 // (dropped from raw strings), NUL, a byte order mark, or invalid UTF-8.
 func indexNotRaw(s string) (int, int) {
-	for i, r := range s {
-		switch r {
-		case '`', '\r', 0, '\uFEFF':
-			return i, utf8.RuneLen(r)
-		case utf8.RuneError:
-			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
-				return i, 1
-			}
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == '`' || r == '\r' || r == 0 || r == '\uFEFF' || (r == utf8.RuneError && size == 1) {
+			return i, size
 		}
+		i += size
 	}
 	return -1, 0
+}
+
+// verifySQLFieldExpr checks that the Go expression written for an SQL field
+// evaluates to the formatted SQL, so that a rewrite never changes the query.
+func verifySQLFieldExpr(expr, formatted string) error {
+	want := "\n" + formatted + "\n"
+	e, err := parser.ParseExpr(expr)
+	if err != nil {
+		return fmt.Errorf("the rewritten SQL field is not a valid Go expression (%v); %s\nexpression: %s", err, reportBug, expr)
+	}
+	got, err := concatStringLits(e)
+	if err != nil || got != want {
+		return fmt.Errorf("the rewritten SQL field does not evaluate to the formatted SQL; %s\nexpected: %q\nactual:   %q", reportBug, want, got)
+	}
+	return nil
 }
