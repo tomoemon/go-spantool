@@ -903,6 +903,108 @@ WHERE
 ORDER BY
   a`,
 		},
+		{
+			name: "trailing line comments stay on their line",
+			input: `SELECT a, -- first
+  b -- second
+FROM t -- table
+WHERE x = 1 -- cond
+  AND y = 2`,
+			want: `SELECT
+  a, -- first
+  b -- second
+FROM
+  t -- table
+WHERE
+  x = 1 -- cond
+  AND y = 2`,
+		},
+		{
+			name: "own-line comments stay before the next token",
+			input: `-- header
+SELECT a
+-- from clause
+FROM t
+/* block */ WHERE x = 1`,
+			want: `-- header
+SELECT
+  a
+-- from clause
+FROM
+  t
+/* block */
+WHERE
+  x = 1`,
+		},
+		{
+			name: "line comment in the middle of a line breaks it",
+			input: `SELECT COALESCE(a, -- fallback
+ b) AS v FROM t`,
+			want: `SELECT
+  COALESCE(a, -- fallback
+  b) AS v
+FROM
+  t`,
+		},
+		{
+			name:  "inline block comments",
+			input: `SELECT /* a */ /* b */ x /* inline */ + y FROM t`,
+			want: `SELECT /* a */ /* b */
+  x /* inline */ + y
+FROM
+  t`,
+		},
+		{
+			name: "comments at the end",
+			input: `SELECT a FROM t -- trailing
+-- own line
+# hash`,
+			want: `SELECT
+  a
+FROM
+  t -- trailing
+-- own line
+# hash`,
+		},
+		{
+			name: "comments in subquery and condition group",
+			input: `SELECT * FROM t WHERE EXISTS (
+  -- inside
+  SELECT 1 FROM u -- u
+  WHERE u.x = t.x
+) AND (a = 1 -- a
+ OR b = 2)`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  EXISTS (
+    -- inside
+    SELECT
+      1
+    FROM
+      u -- u
+    WHERE
+      u.x = t.x
+  )
+  AND (
+    a = 1 -- a
+    OR b = 2
+  )`,
+		},
+		{
+			name: "multi-line block comment is kept as written",
+			input: `SELECT a FROM t /* multi
+   line */ WHERE b = 1`,
+			want: `SELECT
+  a
+FROM
+  t /* multi
+   line */
+WHERE
+  b = 1`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -947,5 +1049,14 @@ func TestVerifyEquivalent(t *testing.T) {
 	}
 	if err := verifyEquivalent(orig, "SELECT a FROM"); err == nil || !strings.Contains(err.Error(), "no longer valid") {
 		t.Errorf("expected invalid SQL to be detected, got: %v", err)
+	}
+}
+
+func TestVerifyComments(t *testing.T) {
+	if err := verifyComments([]string{"-- a", "/* b */"}, "SELECT 1 -- a\n/* b */"); err != nil {
+		t.Errorf("expected same comments to pass, got: %v", err)
+	}
+	if err := verifyComments([]string{"-- a", "/* b */"}, "SELECT 1 -- a"); err == nil || !strings.Contains(err.Error(), "did not keep the comments") {
+		t.Errorf("expected a lost comment to be detected, got: %v", err)
 	}
 }

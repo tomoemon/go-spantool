@@ -19,27 +19,31 @@ func FormatSQL(sql string) (string, error) {
 		return "", err
 	}
 
-	tokens, err := tokenize(sql)
+	tokens, eof, err := tokenize(sql)
 	if err != nil {
 		return "", err
 	}
-	formatted := formatTokens(tokens, buildLayout(stmt, tokens))
+	formatted := formatTokens(tokens, eof, buildLayout(stmt, tokens))
 	if err := verifyEquivalent(stmt, formatted); err != nil {
+		return "", err
+	}
+	if err := verifyComments(commentTexts(tokens, eof), formatted); err != nil {
 		return "", err
 	}
 	return formatted, nil
 }
 
+const reportBug = "this is a fmt-sql bug; please report it with the SQL at https://github.com/tomoemon/go-spantool/issues"
+
 // verifyEquivalent checks that formatting did not change the meaning of the
 // SQL, by comparing the canonical SQL of the original and formatted statements.
 func verifyEquivalent(orig ast.Statement, formatted string) error {
-	const report = "this is a fmt-sql bug; please report it with the SQL at https://github.com/tomoemon/go-spantool/issues"
 	stmt, err := memefish.ParseStatement("", formatted)
 	if err != nil {
-		return fmt.Errorf("formatted SQL is no longer valid (%v); %s\nformatted SQL:\n%s", err, report, formatted)
+		return fmt.Errorf("formatted SQL is no longer valid (%v); %s\nformatted SQL:\n%s", err, reportBug, formatted)
 	}
 	if want, got := orig.SQL(), stmt.SQL(); want != got {
-		return fmt.Errorf("formatting changed the meaning of the SQL; %s\nexpected: %s\nactual:   %s", report, want, got)
+		return fmt.Errorf("formatting changed the meaning of the SQL; %s\nexpected: %s\nactual:   %s", reportBug, want, got)
 	}
 	return nil
 }
@@ -51,17 +55,19 @@ type tok struct {
 	comments []token.TokenComment
 }
 
-func tokenize(sql string) ([]tok, error) {
+// tokenize splits sql into tokens. It also returns the comments after the last
+// token, which memefish attaches to the end-of-input token.
+func tokenize(sql string) ([]tok, []token.TokenComment, error) {
 	lex := &memefish.Lexer{
 		File: &token.File{Buffer: sql},
 	}
 	var tokens []tok
 	for {
 		if err := lex.NextToken(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if lex.Token.Kind == token.TokenEOF {
-			break
+			return tokens, lex.Token.Comments, nil
 		}
 		tokens = append(tokens, tok{
 			kind:     lex.Token.Kind,
@@ -70,7 +76,6 @@ func tokenize(sql string) ([]tok, error) {
 			comments: lex.Token.Comments,
 		})
 	}
-	return tokens, nil
 }
 
 // upperWords lists words that are uppercased even though memefish does not
@@ -162,24 +167,27 @@ type printer struct {
 	tokens        []tok
 	lay           *layout
 	b             strings.Builder
-	prev          int // index of the last written token, -1 at the start
+	starts, ends  []int // output range of each written token, for placing comments
+	prev          int   // index of the last written token, -1 at the start
 	suppressSpace bool
 	depth         int // parenthesis depth
 	sc            *scope
 	outer         []*scope // scopes enclosing sc
 }
 
-func formatTokens(tokens []tok, lay *layout) string {
+func formatTokens(tokens []tok, eof []token.TokenComment, lay *layout) string {
 	p := &printer{
 		tokens: tokens,
 		lay:    lay,
+		starts: make([]int, len(tokens)),
+		ends:   make([]int, len(tokens)),
 		prev:   -1,
 		sc:     &scope{close: -1, bodyIndent: 2},
 	}
 	for i := 0; i < len(tokens); i++ {
 		i = p.token(i)
 	}
-	return strings.TrimSpace(p.b.String())
+	return strings.TrimSpace(placeComments(p.b.String(), tokens, eof, p.starts, p.ends))
 }
 
 // token writes tokens[i] and returns the index of the last token it wrote.
@@ -242,7 +250,9 @@ func (p *printer) token(i int) int {
 }
 
 func (p *printer) write(i int, s string) {
+	p.starts[i] = p.b.Len()
 	p.b.WriteString(s)
+	p.ends[i] = p.b.Len()
 	p.prev = i
 	p.suppressSpace = false
 }

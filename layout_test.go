@@ -15,7 +15,7 @@ func describeLayout(t *testing.T, sql string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokens, err := tokenize(sql)
+	tokens, _, err := tokenize(sql)
 	if err != nil {
 		t.Fatal(err)
 	}
