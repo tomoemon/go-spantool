@@ -18,6 +18,11 @@ func FormatSQL(sql string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if _, ok := stmt.(*ast.GQLGraphQuery); ok {
+		// Graph queries are kept as written: the printer does not know the
+		// spacing rules of graph patterns, e.g. `-[e]->` must not contain spaces
+		return strings.TrimSpace(sql), nil
+	}
 
 	tokens, eof, err := tokenize(sql)
 	if err != nil {
@@ -290,6 +295,12 @@ func (p *printer) hint(i, end int) int {
 }
 
 func (p *printer) openSubquery(i, close int) {
+	if _, ok := p.lay.subqueries[p.prev]; ok {
+		// A subquery right after the "(" of another, as in
+		// ((SELECT ...) UNION ALL ...), starts on its own line so that each
+		// ")" lines up with its "("
+		p.newline(p.sc.clauseIndent)
+	}
 	p.space(i)
 	p.write(i, "(")
 	// The closing ) aligns with the line that opened the subquery,

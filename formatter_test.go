@@ -1091,6 +1091,60 @@ SET
 WHERE
   TRUE`,
 		},
+		{
+			name:  "ORDER BY and LIMIT of an aggregate stay in the call",
+			input: `SELECT ARRAY_AGG(x ORDER BY y LIMIT 1) AS a, STRING_AGG(s, ',' ORDER BY y DESC) FROM t`,
+			want: `SELECT
+  ARRAY_AGG(x ORDER BY y LIMIT 1) AS a,
+  STRING_AGG(s, ',' ORDER BY y DESC)
+FROM
+  t`,
+		},
+		{
+			name:  "CASE inside STRUCT is not expanded",
+			input: `SELECT STRUCT(CASE WHEN a THEN 1 END AS x) AS s FROM t`,
+			want: `SELECT
+  STRUCT(CASE WHEN a THEN 1 END AS x) AS s
+FROM
+  t`,
+		},
+		{
+			name:  "parenthesized set operation in a subquery",
+			input: `SELECT a FROM ((SELECT 1 AS a) UNION ALL (SELECT 2)) WHERE EXISTS ((SELECT 1))`,
+			want: `SELECT
+  a
+FROM
+  (
+    (
+      SELECT
+        1 AS a
+    )
+
+    UNION ALL (
+      SELECT
+        2
+    )
+  )
+WHERE
+  EXISTS (
+    (
+      SELECT
+        1
+    )
+  )`,
+		},
+		{
+			name:  "INSERT without INTO is uppercased",
+			input: `insert or update t (a) values (1)`,
+			want: `INSERT OR UPDATE t(a)
+VALUES
+  (1)`,
+		},
+		{
+			name:  "graph query is kept as written",
+			input: `GRAPH g MATCH (n:Person WHERE n.age > 1)-[e:Knows]->(m) RETURN n.name`,
+			want:  `GRAPH g MATCH (n:Person WHERE n.age > 1)-[e:Knows]->(m) RETURN n.name`,
+		},
 	}
 
 	for _, tt := range tests {

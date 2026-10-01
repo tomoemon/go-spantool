@@ -69,6 +69,8 @@ spanner.Statement{SQL: "SELECT 1"}   // rejected: must be a backtick string lite
 spanner.Statement{SQL: buildSQL()}   // rejected: must be a backtick string literal
 ```
 
+Graph queries (`GRAPH ... MATCH ...`) are kept as written.
+
 SQL syntax errors are reported:
 
 ```go

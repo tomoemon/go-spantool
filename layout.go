@@ -77,8 +77,8 @@ func buildLayout(stmt ast.Statement, tokens []tok) *layout {
 }
 
 // walk records the layout of the nodes under root. When inline is true (inside
-// a parenthesized JOIN), clauses are kept on one line, but subqueries are still
-// laid out on their own.
+// a parenthesized JOIN or a function call), clauses are kept on one line, but
+// subqueries are still laid out on their own.
 func (b *layoutBuilder) walk(root ast.Node, inline bool) {
 	ast.Inspect(root, func(n ast.Node) bool {
 		switch n := n.(type) {
@@ -114,6 +114,13 @@ func (b *layoutBuilder) walk(root ast.Node, inline bool) {
 				b.walk(n.Source, true)
 				return false
 			}
+		case *ast.CallExpr:
+			// ORDER BY and LIMIT of an aggregate, e.g. ARRAY_AGG(x ORDER BY y),
+			// stay in the call
+			if !inline {
+				b.walk(n, true)
+				return false
+			}
 		}
 		if !inline {
 			b.clause(n)
@@ -128,13 +135,18 @@ func (b *layoutBuilder) clause(n ast.Node) {
 	switch n := n.(type) {
 	case *ast.Select:
 		b.block(b.at(n.Select))
-		for k := 1; k < len(n.Results); k++ {
-			b.listSeps[b.find(n.Results[k-1].End(), n.Results[k].Pos(), ",")] = listSelect
+		for k, item := range n.Results {
+			if k > 0 {
+				b.listSeps[b.find(n.Results[k-1].End(), item.Pos(), ",")] = listSelect
+			}
+			// Not every Alias is a SELECT item: STRUCT(x AS a) has one too
+			switch item := item.(type) {
+			case *ast.Alias:
+				b.expandCase(item.Expr)
+			case *ast.ExprSelectItem:
+				b.expandCase(item.Expr)
+			}
 		}
-	case *ast.Alias:
-		b.expandCase(n.Expr)
-	case *ast.ExprSelectItem:
-		b.expandCase(n.Expr)
 	case *ast.From:
 		b.block(b.at(n.From))
 	case *ast.Where:
@@ -185,9 +197,11 @@ func (b *layoutBuilder) clause(n ast.Node) {
 			b.listSeps[b.find(n.CTEs[k-1].End(), n.CTEs[k].Pos(), ",")] = listCTE
 		}
 	case *ast.Insert:
-		into := b.find(n.Insert, n.TableName.Pos(), "INTO")
-		b.keywordRange(b.at(n.Insert), into) // INSERT [OR UPDATE|IGNORE]
-		b.block(into)
+		table := b.at(n.TableName.Pos())
+		b.keywordRange(b.at(n.Insert), table) // INSERT [OR UPDATE|IGNORE] [INTO]
+		if into := b.find(n.Insert, n.TableName.Pos(), "INTO"); into >= 0 {
+			b.block(into)
+		}
 	case *ast.ValuesInput:
 		b.block(b.at(n.Values))
 	case *ast.Update:
