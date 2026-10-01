@@ -75,6 +75,8 @@ WHERE
 `}  // accepted
 ```
 
+Go comments between the joined literals are reported as an error, since rewriting the field would drop them; put them outside the field, or into the SQL as `--` comments.
+
 A single double-quoted string, and expressions that are not string literals (variables, function calls), are not supported, so that SQL is never built at run time:
 
 ```go
