@@ -7,11 +7,11 @@ import (
 	"github.com/cloudspannerecosystem/memefish/token"
 )
 
-// clauseKind is how a clause keyword is laid out.
+// clauseKind is how a clause is laid out.
 type clauseKind int
 
 const (
-	// clauseBlock puts the keyword on its own line and its body on the
+	// clauseBlock puts the keywords on their own line and the body on the
 	// following lines, one level deeper (SELECT, FROM, WHERE, JOIN, ...).
 	clauseBlock clauseKind = iota
 	// clauseSetOp puts a blank line before a set operator (UNION ALL, ...).
@@ -19,11 +19,6 @@ const (
 	// clauseWith starts WITH on a new line and keeps the first CTE on it.
 	clauseWith
 )
-
-type clause struct {
-	kind clauseKind
-	last int // index of the last keyword token, e.g. BY of GROUP BY
-}
 
 // listKind is how a list separator (comma) is laid out.
 type listKind int
@@ -42,46 +37,40 @@ const (
 	casePartEnd
 )
 
-type caseMark struct {
-	part  casePart
-	owner int // index of the CASE token the part belongs to
-}
-
 // layout holds the syntactic role of tokens, keyed by token index. It is
 // derived from the AST so that the printer does not have to guess the role of
-// a keyword from the tokens around it.
+// a token from the tokens around it.
 type layout struct {
-	clauses    map[int]clause
-	condOps    map[int]bool // AND / OR that separate conditions
-	condGroups map[int]int  // "(" of a parenthesized condition group -> its ")"
-	subqueries map[int]int  // "(" of a subquery -> its ")"
-	listSeps   map[int]listKind
-	cases      map[int]caseMark
-	hints      map[int]int // "@" of a hint -> its "}"
+	clauseStarts map[int]clauseKind // first keyword of a clause
+	clauseEnds   map[int]clauseKind // last keyword of a clause, e.g. BY of GROUP BY
+	keywords     map[int]bool       // keywords that memefish lexes as identifiers, e.g. OFFSET
+	condOps      map[int]bool       // AND / OR that separate conditions
+	condGroups   map[int]int        // "(" of a parenthesized condition group -> its ")"
+	subqueries   map[int]int        // "(" of a subquery -> its ")"
+	listSeps     map[int]listKind
+	cases        map[int]casePart // parts of CASE expressions laid out on several lines
+	hints        map[int]int      // "@" of a hint -> its "}"
 }
 
 type layoutBuilder struct {
 	*layout
 	tokens []tok
-	index  map[token.Pos]int // token start position -> token index
 }
 
 func buildLayout(stmt ast.Statement, tokens []tok) *layout {
 	b := &layoutBuilder{
 		layout: &layout{
-			clauses:    map[int]clause{},
-			condOps:    map[int]bool{},
-			condGroups: map[int]int{},
-			subqueries: map[int]int{},
-			listSeps:   map[int]listKind{},
-			cases:      map[int]caseMark{},
-			hints:      map[int]int{},
+			clauseStarts: map[int]clauseKind{},
+			clauseEnds:   map[int]clauseKind{},
+			keywords:     map[int]bool{},
+			condOps:      map[int]bool{},
+			condGroups:   map[int]int{},
+			subqueries:   map[int]int{},
+			listSeps:     map[int]listKind{},
+			cases:        map[int]casePart{},
+			hints:        map[int]int{},
 		},
 		tokens: tokens,
-		index:  make(map[token.Pos]int, len(tokens)),
-	}
-	for i, t := range tokens {
-		b.index[t.pos] = i
 	}
 	b.walk(stmt, false)
 	return b.layout
@@ -97,44 +86,34 @@ func (b *layoutBuilder) walk(root ast.Node, inline bool) {
 			b.hints[b.at(n.Atmark)] = b.at(n.Rbrace)
 			return false
 		case *ast.SubQuery:
-			b.subquery(b.at(n.Lparen), b.at(n.Rparen), n.Query)
+			b.subquery(b.at(n.Lparen), n.Rparen, n.Query)
 			return false
 		case *ast.ScalarSubQuery:
-			b.subquery(b.at(n.Lparen), b.at(n.Rparen), n.Query)
+			b.subquery(b.at(n.Lparen), n.Rparen, n.Query)
 			return false
 		case *ast.SubQueryInCondition:
-			b.subquery(b.at(n.Lparen), b.at(n.Rparen), n.Query)
+			b.subquery(b.at(n.Lparen), n.Rparen, n.Query)
 			return false
 		case *ast.SubQueryTableExpr:
-			b.subquery(b.at(n.Lparen), b.at(n.Rparen), n.Query)
+			b.subquery(b.at(n.Lparen), n.Rparen, n.Query)
 			return false
 		case *ast.ArraySubQuery:
-			b.subquery(b.matchingOpen(b.at(n.Rparen)), b.at(n.Rparen), n.Query)
+			b.subquery(b.find(n.Array, n.Query.Pos(), "("), n.Rparen, n.Query)
 			return false
 		case *ast.ExistsSubQuery:
 			if n.Hint != nil {
 				b.walk(n.Hint, inline)
 			}
-			b.subquery(b.matchingOpen(b.at(n.Rparen)), b.at(n.Rparen), n.Query)
+			b.subquery(b.find(n.Exists, n.Query.Pos(), "("), n.Rparen, n.Query)
 			return false
 		case *ast.CTE:
-			b.subquery(b.matchingOpen(b.at(n.Rparen)), b.at(n.Rparen), n.QueryExpr)
+			b.subquery(b.find(n.Name.End(), n.QueryExpr.Pos(), "("), n.Rparen, n.QueryExpr)
 			return false
 		case *ast.ParenTableExpr:
 			if !inline {
 				b.walk(n.Source, true)
 				return false
 			}
-		case *ast.CaseExpr:
-			owner := b.at(n.Case)
-			b.cases[owner] = caseMark{casePartCase, owner}
-			for _, w := range n.Whens {
-				b.cases[b.at(w.When)] = caseMark{casePartWhen, owner}
-			}
-			if n.Else != nil {
-				b.cases[b.at(n.Else.Else)] = caseMark{casePartElse, owner}
-			}
-			b.cases[b.at(n.EndPos)] = caseMark{casePartEnd, owner}
 		}
 		if !inline {
 			b.clause(n)
@@ -143,7 +122,8 @@ func (b *layoutBuilder) walk(root ast.Node, inline bool) {
 	})
 }
 
-// clause records the clause keywords, list separators and conditions of n.
+// clause records the clauses, list separators, conditions and expanded CASE
+// expressions of n.
 func (b *layoutBuilder) clause(n ast.Node) {
 	switch n := n.(type) {
 	case *ast.Select:
@@ -151,6 +131,10 @@ func (b *layoutBuilder) clause(n ast.Node) {
 		for k := 1; k < len(n.Results); k++ {
 			b.listSeps[b.find(n.Results[k-1].End(), n.Results[k].Pos(), ",")] = listSelect
 		}
+	case *ast.Alias:
+		b.expandCase(n.Expr)
+	case *ast.ExprSelectItem:
+		b.expandCase(n.Expr)
 	case *ast.From:
 		b.block(b.at(n.From))
 	case *ast.Where:
@@ -163,13 +147,20 @@ func (b *layoutBuilder) clause(n ast.Node) {
 		b.block(b.at(n.Having))
 		b.cond(n.Expr)
 	case *ast.GroupBy:
-		b.blockRange(b.at(n.Group), b.find(n.Group, n.Exprs[0].Pos(), "BY"))
+		b.clauseRange(clauseBlock, b.at(n.Group), b.find(n.Group, n.Exprs[0].Pos(), "BY"))
+		for _, e := range n.Exprs {
+			b.expandCase(e)
+		}
 	case *ast.OrderBy:
-		b.blockRange(b.at(n.Order), b.find(n.Order, n.Items[0].Pos(), "BY"))
+		b.clauseRange(clauseBlock, b.at(n.Order), b.find(n.Order, n.Items[0].Pos(), "BY"))
+	case *ast.OrderByItem:
+		b.expandCase(n.Expr)
 	case *ast.Limit:
 		b.block(b.at(n.Limit))
 	case *ast.Offset:
 		b.block(b.at(n.Offset))
+	case *ast.WithOffset:
+		b.keywords[b.at(n.Offset)] = true
 	case *ast.Join:
 		if n.Op == ast.CommaJoin {
 			return
@@ -178,31 +169,40 @@ func (b *layoutBuilder) clause(n ast.Node) {
 		if n.Hint != nil {
 			right = n.Hint.Pos()
 		}
-		b.blockRange(b.after(n.Left.End()), b.find(n.Left.End(), right, "JOIN"))
+		b.clauseRange(clauseBlock, b.after(n.Left.End()), b.find(n.Left.End(), right, "JOIN"))
 	case *ast.CompoundQuery:
 		for k := 1; k < len(n.Queries); k++ {
 			op := b.after(n.Queries[k-1].End())
 			last := op
-			if next := b.tokens[op+1]; isKeywordLike(next, "ALL") || isKeywordLike(next, "DISTINCT") {
+			if n.AllOrDistinct != "" {
 				last = op + 1
 			}
-			b.clauses[op] = clause{clauseSetOp, last}
+			b.clauseRange(clauseSetOp, op, last)
 		}
 	case *ast.With:
-		w := b.at(n.With)
-		b.clauses[w] = clause{clauseWith, w}
+		b.clauseRange(clauseWith, b.at(n.With), b.at(n.With))
 		for k := 1; k < len(n.CTEs); k++ {
 			b.listSeps[b.find(n.CTEs[k-1].End(), n.CTEs[k].Pos(), ",")] = listCTE
 		}
 	case *ast.Insert:
-		b.block(b.find(n.Insert, n.TableName.Pos(), "INTO"))
+		into := b.find(n.Insert, n.TableName.Pos(), "INTO")
+		b.keywordRange(b.at(n.Insert), into) // INSERT [OR UPDATE|IGNORE]
+		b.block(into)
 	case *ast.ValuesInput:
 		b.block(b.at(n.Values))
 	case *ast.Update:
+		b.keywords[b.at(n.Update)] = true
 		b.block(b.find(n.Update, n.Updates[0].Pos(), "SET"))
+	case *ast.UpdateItemSetValue:
+		if n.DefaultExpr.Expr != nil {
+			b.expandCase(n.DefaultExpr.Expr)
+		}
 	case *ast.ConflictActionDoUpdate:
-		b.block(b.find(n.Do, n.UpdateItems[0].Pos(), "SET"))
+		set := b.find(n.Do, n.UpdateItems[0].Pos(), "SET")
+		b.keywordRange(b.at(n.Do), set) // DO UPDATE
+		b.block(set)
 	case *ast.Delete:
+		b.keywords[b.at(n.Delete)] = true
 		if from := b.find(n.Delete, n.TableName.Pos(), "FROM"); from >= 0 {
 			b.block(from)
 		}
@@ -210,15 +210,25 @@ func (b *layoutBuilder) clause(n ast.Node) {
 }
 
 func (b *layoutBuilder) block(i int) {
-	b.blockRange(i, i)
+	b.clauseRange(clauseBlock, i, i)
 }
 
-func (b *layoutBuilder) blockRange(first, last int) {
-	b.clauses[first] = clause{clauseBlock, last}
+func (b *layoutBuilder) clauseRange(kind clauseKind, first, last int) {
+	b.clauseStarts[first] = kind
+	b.clauseEnds[last] = kind
+	b.keywords[first] = true
+	b.keywords[last] = true
 }
 
-func (b *layoutBuilder) subquery(open, close int, query ast.Node) {
-	b.subqueries[open] = close
+// keywordRange marks tokens[first..last) as keywords.
+func (b *layoutBuilder) keywordRange(first, last int) {
+	for i := first; i < last; i++ {
+		b.keywords[i] = true
+	}
+}
+
+func (b *layoutBuilder) subquery(open int, rparen token.Pos, query ast.Node) {
+	b.subqueries[open] = b.at(rparen)
 	b.walk(query, false)
 }
 
@@ -242,12 +252,34 @@ func (b *layoutBuilder) cond(e ast.Expr) {
 			b.condGroups[b.at(e.Lparen)] = b.at(e.Rparen)
 			b.cond(inner)
 		}
+	case *ast.CaseExpr:
+		b.expandCase(e)
 	}
+}
+
+// expandCase lays out e on several lines if it is a CASE expression. It is
+// called for expressions that stand on their own: a SELECT / ORDER BY /
+// GROUP BY item, a SET value, a condition, and a result of an expanded CASE.
+func (b *layoutBuilder) expandCase(e ast.Expr) {
+	c, ok := e.(*ast.CaseExpr)
+	if !ok {
+		return
+	}
+	b.cases[b.at(c.Case)] = casePartCase
+	for _, w := range c.Whens {
+		b.cases[b.at(w.When)] = casePartWhen
+		b.expandCase(w.Then)
+	}
+	if c.Else != nil {
+		b.cases[b.at(c.Else.Else)] = casePartElse
+		b.expandCase(c.Else.Expr)
+	}
+	b.cases[b.at(c.EndPos)] = casePartEnd
 }
 
 // at returns the index of the token starting at pos, or -1.
 func (b *layoutBuilder) at(pos token.Pos) int {
-	if i, ok := b.index[pos]; ok {
+	if i := b.after(pos); i < len(b.tokens) && b.tokens[i].pos == pos {
 		return i
 	}
 	return -1
@@ -259,30 +291,13 @@ func (b *layoutBuilder) after(pos token.Pos) int {
 	return sort.Search(len(b.tokens), func(i int) bool { return b.tokens[i].pos >= pos })
 }
 
-// find returns the index of the first token in [from, to) that is the given
-// keyword or symbol, or -1. It is used for keywords whose position the AST
-// does not record, such as JOIN, AND / OR and commas between list items.
-func (b *layoutBuilder) find(from, to token.Pos, keyword string) int {
+// find returns the index of the first token of the given kind (a reserved
+// keyword or a symbol) in [from, to), or -1. It is used for tokens whose
+// position the AST does not record, such as JOIN, AND / OR and commas.
+func (b *layoutBuilder) find(from, to token.Pos, kind string) int {
 	for i := b.after(from); i < len(b.tokens) && b.tokens[i].pos < to; i++ {
-		if isKeywordLike(b.tokens[i], keyword) {
+		if string(b.tokens[i].kind) == kind {
 			return i
-		}
-	}
-	return -1
-}
-
-// matchingOpen returns the index of the "(" that matches the ")" at close.
-func (b *layoutBuilder) matchingOpen(close int) int {
-	d := 0
-	for i := close; i >= 0; i-- {
-		switch string(b.tokens[i].kind) {
-		case ")":
-			d++
-		case "(":
-			d--
-			if d == 0 {
-				return i
-			}
 		}
 	}
 	return -1

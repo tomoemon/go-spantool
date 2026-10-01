@@ -21,9 +21,13 @@ func describeLayout(t *testing.T, sql string) []string {
 	}
 	lay := buildLayout(stmt, tokens)
 	var marks []string
+	var first string // first keyword of the clause being read
 	for i, tk := range tokens {
-		if c, ok := lay.clauses[i]; ok {
-			marks = append(marks, fmt.Sprintf("clause%d:%s..%s", c.kind, tk.raw, tokens[c.last].raw))
+		if _, ok := lay.clauseStarts[i]; ok {
+			first = tk.raw
+		}
+		if k, ok := lay.clauseEnds[i]; ok {
+			marks = append(marks, fmt.Sprintf("clause%d:%s..%s", k, first, tk.raw))
 		}
 		if lay.condOps[i] {
 			marks = append(marks, "cond:"+tk.raw)
@@ -37,8 +41,8 @@ func describeLayout(t *testing.T, sql string) []string {
 		if k, ok := lay.listSeps[i]; ok {
 			marks = append(marks, fmt.Sprintf("sep%d:,", k))
 		}
-		if c, ok := lay.cases[i]; ok {
-			marks = append(marks, fmt.Sprintf("case%d:%s", c.part, tk.raw))
+		if part, ok := lay.cases[i]; ok {
+			marks = append(marks, fmt.Sprintf("case%d:%s", part, tk.raw))
 		}
 		if _, ok := lay.hints[i]; ok {
 			marks = append(marks, "hint:@")

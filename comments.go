@@ -61,51 +61,38 @@ func placeComments(out string, tokens []tok, eof []token.TokenComment, starts, e
 		p := starts[i]
 		lineStart := strings.LastIndex(out[:p], "\n") + 1
 		atLineStart := strings.TrimLeft(out[lineStart:p], " ") == ""
-		rest := out[lineStart:]
-		lineIndent := rest[:len(rest)-len(strings.TrimLeft(rest, " "))]
-		sameLine := i > 0 // still on the line of the previous token
-		for _, c := range t.comments {
+		indent := strings.Repeat(" ", lineIndent(out[:p]))
+		for k, c := range t.comments {
 			text := commentText(c)
-			if strings.Contains(c.Space, "\n") {
-				sameLine = false
-			}
 			switch {
-			case sameLine && atLineStart:
+			case i > 0 && atLineStart && onPrevLine(t.comments, k):
 				ins = append(ins, insertion{ends[i-1], " " + text})
 			case atLineStart:
-				ins = append(ins, insertion{p, text + "\n" + out[lineStart:p]})
+				ins = append(ins, insertion{p, text + "\n" + indent})
 			default:
 				if p > 0 && !strings.ContainsRune(" (\n", rune(out[p-1])) {
 					text = " " + text
 				}
 				if isLineComment(c) {
-					ins = append(ins, insertion{p, text + "\n" + lineIndent})
+					ins = append(ins, insertion{p, text + "\n" + indent})
 				} else {
 					ins = append(ins, insertion{p, text + " "})
 				}
 			}
-			if isLineComment(c) {
-				sameLine = false
-			}
 		}
 	}
-
 	if len(tokens) > 0 {
 		end := ends[len(tokens)-1]
-		sameLine := true
-		for _, c := range eof {
-			if strings.Contains(c.Space, "\n") {
-				sameLine = false
-			}
-			if sameLine {
+		for k, c := range eof {
+			if onPrevLine(eof, k) {
 				ins = append(ins, insertion{end, " " + commentText(c)})
 			} else {
 				ins = append(ins, insertion{end, "\n" + commentText(c)})
 			}
-			if isLineComment(c) {
-				sameLine = false
-			}
 		}
+	}
+	if len(ins) == 0 {
+		return out
 	}
 
 	sort.SliceStable(ins, func(a, b int) bool { return ins[a].at < ins[b].at })
@@ -118,6 +105,22 @@ func placeComments(out string, tokens []tok, eof []token.TokenComment, starts, e
 	}
 	b.WriteString(out[last:])
 	return b.String()
+}
+
+// onPrevLine reports whether comments[k] is on the same line as the token
+// before the comments, i.e. no line break comes before it.
+func onPrevLine(comments []token.TokenComment, k int) bool {
+	for _, c := range comments[:k+1] {
+		if strings.Contains(c.Space, "\n") {
+			return false
+		}
+	}
+	for _, c := range comments[:k] {
+		if isLineComment(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyComments checks that the formatted SQL has the same comments, in the

@@ -78,14 +78,6 @@ func tokenize(sql string) ([]tok, []token.TokenComment, error) {
 	}
 }
 
-// upperWords lists words that are uppercased even though memefish does not
-// lex them as reserved keywords.
-var upperWords = map[string]bool{
-	"SELECT": true, "FROM": true, "WHERE": true, "HAVING": true,
-	"LIMIT": true, "SET": true, "INTO": true, "VALUES": true, "RETURNING": true,
-	"ON": true, "OFFSET": true, "INSERT": true, "UPDATE": true, "DELETE": true,
-}
-
 // noSpaceBefore lists symbols that should not have a space before them.
 var noSpaceBefore = map[string]bool{
 	".": true, ",": true, ")": true, "]": true, ";": true,
@@ -94,23 +86,6 @@ var noSpaceBefore = map[string]bool{
 // noSpaceAfter lists symbols that should not have a space after them.
 var noSpaceAfter = map[string]bool{
 	".": true, "(": true, "[": true,
-}
-
-func upper(t tok) string {
-	if _, ok := token.KeywordsMap[t.kind]; ok {
-		return string(t.kind)
-	}
-	if u := strings.ToUpper(t.raw); upperWords[u] {
-		return u
-	}
-	return t.raw
-}
-
-func isKeywordLike(t tok, keyword string) bool {
-	if string(t.kind) == keyword {
-		return true
-	}
-	return strings.EqualFold(t.raw, keyword)
 }
 
 func needsSpace(prev, cur tok) bool {
@@ -122,6 +97,10 @@ func needsSpace(prev, cur tok) bool {
 	}
 	// Function call: no space before ( immediately following an identifier or keyword
 	if string(cur.kind) == "(" && (prev.kind == token.TokenIdent || isFuncKeyword(prev)) {
+		return false
+	}
+	// Table hint: `@{...}` attaches to the table name
+	if string(cur.kind) == "@" && prev.kind == token.TokenIdent {
 		return false
 	}
 	// Array subscript: no space before [ following an operand
@@ -141,27 +120,19 @@ func isFuncKeyword(t tok) bool {
 }
 
 // scope is the indentation state of a query: the whole statement or a subquery.
+// Clause bodies are indented one level (2 spaces) deeper than clause keywords,
+// and the closing ")" of a subquery one level shallower.
 type scope struct {
-	close        int // index of the ")" closing the subquery, -1 for the statement
-	baseDepth    int // parenthesis depth just inside the subquery
-	closeIndent  int // indentation of the closing ")"
-	clauseIndent int // indentation of clause keywords
-	bodyIndent   int // indentation of clause bodies
-	condGroups   []condGroup
-	cases        []caseFrame
+	close        int   // index of the ")" closing the subquery, -1 for the statement
+	clauseIndent int   // indentation of clause keywords
+	condGroups   []int // indexes of the ")" closing the open condition groups
+	cases        []int // indentation of the open expanded CASE expressions
 }
 
-// condGroup is an expanded parenthesized group of conditions.
-type condGroup struct {
-	close       int // index of the closing ")"
-	outerIndent int // indentation of the closing ")"
-}
+func (sc *scope) bodyIndent() int { return sc.clauseIndent + 2 }
 
-// caseFrame is an expanded CASE expression.
-type caseFrame struct {
-	owner  int // index of the CASE token
-	indent int // indentation of CASE and END
-}
+// condIndent is the indentation of a condition inside the open condition groups.
+func (sc *scope) condIndent() int { return sc.bodyIndent() + 2*len(sc.condGroups) }
 
 type printer struct {
 	tokens        []tok
@@ -170,7 +141,6 @@ type printer struct {
 	starts, ends  []int // output range of each written token, for placing comments
 	prev          int   // index of the last written token, -1 at the start
 	suppressSpace bool
-	depth         int // parenthesis depth
 	sc            *scope
 	outer         []*scope // scopes enclosing sc
 }
@@ -182,7 +152,7 @@ func formatTokens(tokens []tok, eof []token.TokenComment, lay *layout) string {
 		starts: make([]int, len(tokens)),
 		ends:   make([]int, len(tokens)),
 		prev:   -1,
-		sc:     &scope{close: -1, bodyIndent: 2},
+		sc:     &scope{close: -1},
 	}
 	for i := 0; i < len(tokens); i++ {
 		i = p.token(i)
@@ -192,9 +162,7 @@ func formatTokens(tokens []tok, eof []token.TokenComment, lay *layout) string {
 
 // token writes tokens[i] and returns the index of the last token it wrote.
 func (p *printer) token(i int) int {
-	t := p.tokens[i]
 	sc := p.sc
-
 	if end, ok := p.lay.hints[i]; ok {
 		return p.hint(i, end)
 	}
@@ -206,47 +174,59 @@ func (p *printer) token(i int) int {
 		p.openCondGroup(i, close)
 		return i
 	}
-	switch string(t.kind) {
-	case "(":
-		p.depth++
-	case ")":
-		if i == sc.close {
-			p.closeSubquery(i)
-			return i
-		}
-		if n := len(sc.condGroups); n > 0 && sc.condGroups[n-1].close == i {
-			p.closeCondGroup(i)
-			return i
-		}
-		p.depth--
-	}
-
-	// CASE is expanded only outside parentheses, e.g. not inside a function call
-	if m, ok := p.lay.cases[i]; ok && p.depth == sc.baseDepth && p.casePart(i, m) {
+	if i == sc.close {
+		p.closeSubquery(i)
 		return i
 	}
-	if c, ok := p.lay.clauses[i]; ok {
-		return p.clause(i, c)
+	if n := len(sc.condGroups); n > 0 && sc.condGroups[n-1] == i {
+		p.closeCondGroup(i)
+		return i
+	}
+	if part, ok := p.lay.cases[i]; ok {
+		p.casePart(i, part)
+		return i
 	}
 	if k, ok := p.lay.listSeps[i]; ok {
 		p.write(i, ",")
 		if k == listCTE {
 			p.newline(sc.clauseIndent)
 		} else {
-			p.newline(sc.bodyIndent)
+			p.newline(sc.bodyIndent())
 		}
-		p.suppressSpace = true
 		return i
 	}
 	if p.lay.condOps[i] {
-		p.newline(sc.bodyIndent + 2*len(sc.condGroups))
-		p.write(i, upper(t))
+		p.newline(sc.condIndent())
+		p.write(i, p.upper(i))
 		return i
 	}
 
+	if kind, ok := p.lay.clauseStarts[i]; ok {
+		if kind == clauseSetOp {
+			p.b.WriteString("\n")
+		}
+		if p.b.Len() > 0 {
+			p.newline(sc.clauseIndent)
+		}
+	}
 	p.space(i)
-	p.write(i, upper(t))
+	p.write(i, p.upper(i))
+	if kind, ok := p.lay.clauseEnds[i]; ok && kind == clauseBlock {
+		p.newline(sc.bodyIndent())
+	}
 	return i
+}
+
+// upper returns tokens[i], uppercased if it is a keyword.
+func (p *printer) upper(i int) string {
+	t := p.tokens[i]
+	if _, ok := token.KeywordsMap[t.kind]; ok {
+		return string(t.kind)
+	}
+	if p.lay.keywords[i] {
+		return strings.ToUpper(t.raw)
+	}
+	return t.raw
 }
 
 func (p *printer) write(i int, s string) {
@@ -257,9 +237,11 @@ func (p *printer) write(i int, s string) {
 	p.suppressSpace = false
 }
 
+// newline starts a new line. The next token is written without a space.
 func (p *printer) newline(indent int) {
 	p.b.WriteString("\n")
 	p.b.WriteString(strings.Repeat(" ", indent))
+	p.suppressSpace = true
 }
 
 // space writes a space before tokens[i] if it needs one.
@@ -269,76 +251,33 @@ func (p *printer) space(i int) {
 	}
 }
 
-// words writes tokens[first..last] separated by spaces.
-func (p *printer) words(first, last int) {
-	for j := first; j <= last; j++ {
-		if j > first {
-			p.b.WriteString(" ")
-		}
-		p.write(j, upper(p.tokens[j]))
-	}
-}
-
-func (p *printer) clause(i int, c clause) int {
-	sc := p.sc
-	switch c.kind {
-	case clauseWith:
-		if p.b.Len() > 0 {
-			p.newline(sc.clauseIndent)
-		}
-		p.write(i, upper(p.tokens[i]))
-	case clauseSetOp:
-		p.b.WriteString("\n")
-		p.newline(sc.clauseIndent)
-		p.words(i, c.last)
-		p.suppressSpace = true
-	case clauseBlock:
-		if p.b.Len() > 0 {
-			p.newline(sc.clauseIndent)
-		}
-		p.words(i, c.last)
-		p.newline(sc.bodyIndent)
-		p.suppressSpace = true
-	}
-	return c.last
-}
-
-// casePart writes a part of an expanded CASE expression. It returns false if
-// the part belongs to a CASE that is not expanded.
-func (p *printer) casePart(i int, m caseMark) bool {
+// casePart writes a part of an expanded CASE expression.
+func (p *printer) casePart(i int, part casePart) {
 	sc := p.sc
 	n := len(sc.cases)
-	u := upper(p.tokens[i])
-	if m.part == casePartCase {
-		indent := sc.bodyIndent
-		if n == 0 {
-			p.space(i)
-		} else {
-			// Nested CASE starts on its own line
-			indent = sc.cases[n-1].indent + 4
-			p.newline(indent)
-		}
-		p.write(i, u)
-		sc.cases = append(sc.cases, caseFrame{owner: i, indent: indent})
-		return true
-	}
-	if n == 0 || sc.cases[n-1].owner != m.owner {
-		return false
-	}
-	top := sc.cases[n-1]
-	if m.part == casePartEnd {
+	switch {
+	case part == casePartCase && n == 0:
+		sc.cases = append(sc.cases, sc.condIndent())
+		p.space(i)
+	case part == casePartCase:
+		// Nested CASE starts on its own line
+		indent := sc.cases[n-1] + 4
+		sc.cases = append(sc.cases, indent)
+		p.newline(indent)
+	case part == casePartEnd:
+		indent := sc.cases[n-1]
 		sc.cases = sc.cases[:n-1]
-		p.newline(top.indent)
-	} else {
-		p.newline(top.indent + 2)
+		p.newline(indent)
+	default: // WHEN, ELSE
+		p.newline(sc.cases[n-1] + 2)
 	}
-	p.write(i, u)
-	return true
+	p.write(i, p.upper(i))
 }
 
 // hint writes the hint `@{...}` at tokens[i..end] without spaces, as memefish
 // splits it into separate tokens.
 func (p *printer) hint(i, end int) int {
+	p.space(i)
 	for j := i; j <= end; j++ {
 		switch string(p.tokens[j].kind) {
 		case ",":
@@ -351,54 +290,39 @@ func (p *printer) hint(i, end int) int {
 }
 
 func (p *printer) openSubquery(i, close int) {
-	p.depth++
 	p.space(i)
 	p.write(i, "(")
 	// The closing ) aligns with the line that opened the subquery,
 	// and the body is indented one level deeper.
-	closeIndent := currentLineIndent(&p.b)
 	p.outer = append(p.outer, p.sc)
-	p.sc = &scope{
-		close:        close,
-		baseDepth:    p.depth,
-		closeIndent:  closeIndent,
-		clauseIndent: closeIndent + 2,
-		bodyIndent:   closeIndent + 4,
-	}
+	p.sc = &scope{close: close, clauseIndent: lineIndent(p.b.String()) + 2}
 	p.suppressSpace = true
 }
 
 func (p *printer) closeSubquery(i int) {
-	p.newline(p.sc.closeIndent)
+	p.newline(p.sc.clauseIndent - 2)
 	p.write(i, ")")
 	p.sc = p.outer[len(p.outer)-1]
 	p.outer = p.outer[:len(p.outer)-1]
-	p.depth--
 }
 
 func (p *printer) openCondGroup(i, close int) {
 	sc := p.sc
-	p.depth++
-	outerIndent := sc.bodyIndent + 2*len(sc.condGroups)
-	sc.condGroups = append(sc.condGroups, condGroup{close: close, outerIndent: outerIndent})
 	p.space(i)
 	p.write(i, "(")
-	p.newline(outerIndent + 2)
-	p.suppressSpace = true
+	sc.condGroups = append(sc.condGroups, close)
+	p.newline(sc.condIndent())
 }
 
 func (p *printer) closeCondGroup(i int) {
 	sc := p.sc
-	cg := sc.condGroups[len(sc.condGroups)-1]
 	sc.condGroups = sc.condGroups[:len(sc.condGroups)-1]
-	p.newline(cg.outerIndent)
+	p.newline(sc.condIndent())
 	p.write(i, ")")
-	p.depth--
 }
 
-// currentLineIndent returns the number of leading spaces on the line being written.
-func currentLineIndent(b *strings.Builder) int {
-	s := b.String()
+// lineIndent returns the number of leading spaces on the last line of s.
+func lineIndent(s string) int {
 	line := s[strings.LastIndex(s, "\n")+1:]
 	return len(line) - len(strings.TrimLeft(line, " "))
 }

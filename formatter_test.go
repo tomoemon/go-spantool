@@ -1005,6 +1005,92 @@ FROM
 WHERE
   b = 1`,
 		},
+		{
+			name:  "identifiers named like keywords keep their case",
+			input: `SELECT values, offset, update, cnt.select FROM t`,
+			want: `SELECT
+  values,
+  offset,
+  update,
+  cnt.select
+FROM
+  t`,
+		},
+		{
+			name:  "keywords lexed as identifiers are uppercased in keyword positions",
+			input: `insert or update into t (a) values (1)`,
+			want: `INSERT OR UPDATE
+INTO
+  t(a)
+VALUES
+  (1)`,
+		},
+		{
+			name:  "lowercase LIMIT OFFSET and WITH OFFSET",
+			input: `select x from unnest(@a) as x with offset as o limit 1 offset 2`,
+			want: `SELECT
+  x
+FROM
+  UNNEST(@a) AS x WITH OFFSET AS o
+LIMIT
+  1
+OFFSET
+  2`,
+		},
+		{
+			name:  "GROUP BY with hint",
+			input: `SELECT a FROM t GROUP @{GROUP_METHOD=HASH_GROUP} BY a`,
+			want: `SELECT
+  a
+FROM
+  t
+GROUP @{GROUP_METHOD=HASH_GROUP} BY
+  a`,
+		},
+		{
+			name:  "CASE inside conditional paren",
+			input: `SELECT * FROM t WHERE x = 1 AND (CASE WHEN a THEN TRUE ELSE FALSE END AND b = 2 OR c = 3)`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  x = 1
+  AND (
+    CASE
+      WHEN a THEN TRUE
+      ELSE FALSE
+    END
+    AND b = 2
+    OR c = 3
+  )`,
+		},
+		{
+			name:  "CASE in ORDER BY is expanded but CASE inside an expression is not",
+			input: `SELECT 1 + CASE WHEN a THEN 1 ELSE 0 END AS v, [CASE WHEN a THEN 1 END] AS arr FROM t ORDER BY CASE WHEN b THEN 0 ELSE 1 END`,
+			want: `SELECT
+  1 + CASE WHEN a THEN 1 ELSE 0 END AS v,
+  [CASE WHEN a THEN 1 END] AS arr
+FROM
+  t
+ORDER BY
+  CASE
+    WHEN b THEN 0
+    ELSE 1
+  END`,
+		},
+		{
+			name:  "CASE in UPDATE SET",
+			input: `UPDATE t SET a = CASE WHEN b THEN 1 ELSE 2 END WHERE TRUE`,
+			want: `UPDATE t
+SET
+  a = CASE
+    WHEN b THEN 1
+    ELSE 2
+  END
+WHERE
+  TRUE`,
+		},
 	}
 
 	for _, tt := range tests {
