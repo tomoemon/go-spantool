@@ -28,14 +28,6 @@ var _ = spanner.Statement{SQL: buildSQL()}
 			wantErr: "line 3: found function call buildSQL()",
 		},
 		{
-			name: "double-quoted string is rejected",
-			src: `package x
-import "cloud.google.com/go/spanner"
-var _ = spanner.Statement{SQL: "SELECT 1"}
-`,
-			wantErr: `line 3: found double-quoted string literal "SELECT 1"`,
-		},
-		{
 			name: "concatenation with a variable is rejected",
 			src: `package x
 import "cloud.google.com/go/spanner"
@@ -50,14 +42,6 @@ import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + fmt.Sprintf("%s", t)}
 `,
 			wantErr: `line 3: found function call fmt.Sprintf("%s", t)`,
-		},
-		{
-			name: "double-quoted string with a backtick-quoted identifier is rejected",
-			src: `package x
-import "cloud.google.com/go/spanner"
-var _ = spanner.Statement{SQL: "SELECT * FROM ` + "`Following`" + `"}
-`,
-			wantErr: "a backtick string literal cannot contain a backtick, so join string literals with +",
 		},
 		{
 			name: "comment inside joined string literals is rejected, not dropped",
@@ -104,6 +88,48 @@ func TestFormatGoFile_concatenatedSQL(t *testing.T) {
 		src  string
 		want string
 	}{
+		{
+			name: "double-quoted string literal is rewritten as a backtick string literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT a FROM t"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  a
+FROM
+  t
+‵}
+`,
+		},
+		{
+			name: "double-quoted string literal with a backtick-quoted identifier",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT FromUserID FROM ‵Following‵ WHERE FromUserID = @fromUserID"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  FromUserID
+FROM
+  ‵ + "‵Following‵" + ‵
+WHERE
+  FromUserID = @fromUserID
+‵}
+`,
+		},
 		{
 			name: "backtick-quoted identifier is kept as a double-quoted literal",
 			src: `package x

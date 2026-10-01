@@ -77,9 +77,8 @@ func formatGoFile(src []byte) ([]byte, error) {
 	}
 	fields, fieldErrors := collectSpannerSQLFields(fset, file, spannerIdent)
 	if len(fieldErrors) > 0 {
-		return nil, fmt.Errorf("spanner.Statement SQL field must be a backtick string literal, "+
-			"or string literals joined with + to write a backtick-quoted identifier "+
-			"(e.g. `SELECT * FROM ` + \"`Following`\"); SQL built at run time is not supported:\n%s",
+		return nil, fmt.Errorf("spanner.Statement SQL field must be a string literal or string literals joined with +; "+
+			"SQL built at run time is not supported, so write the SQL itself in the field:\n%s",
 			strings.Join(fieldErrors, "\n"))
 	}
 	if len(fields) == 0 {
@@ -127,13 +126,13 @@ func formatGoFile(src []byte) ([]byte, error) {
 
 // sqlField is the SQL field of a spanner.Statement literal.
 type sqlField struct {
-	expr ast.Expr // a backtick string literal, or string literals joined with +
+	expr ast.Expr // a string literal, or string literals joined with +
 	sql  string   // the SQL that expr evaluates to
 }
 
 // collectSpannerSQLFields collects SQL fields from spanner.Statement{SQL: ...}
 // in the AST. It returns error messages for SQL fields that are neither a
-// backtick string literal nor string literals joined with +.
+// string literal nor string literals joined with +.
 func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent string) ([]sqlField, []string) {
 	var fields []sqlField
 	var errs []string
@@ -152,7 +151,7 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 			if !ok || key.Name != "SQL" {
 				continue
 			}
-			sql, err := evalSQLField(kv.Value)
+			sql, err := concatStringLits(kv.Value)
 			if err != nil {
 				pos := fset.Position(kv.Value.Pos())
 				errs = append(errs, fmt.Sprintf("  line %d: %v", pos.Line, err))
@@ -164,19 +163,6 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 		return true
 	})
 	return fields, errs
-}
-
-// evalSQLField returns the SQL that expr evaluates to. expr must be a
-// backtick string literal or string literals joined with +.
-func evalSQLField(expr ast.Expr) (string, error) {
-	if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING && lit.Value[0] != '`' {
-		if strings.Contains(lit.Value, "`") {
-			return "", fmt.Errorf("found double-quoted string literal %s; a backtick string literal cannot contain a backtick, "+
-				"so join string literals with + (e.g. `SELECT * FROM ` + \"`Following`\")", lit.Value)
-		}
-		return "", fmt.Errorf("found double-quoted string literal %s; use a backtick string literal", lit.Value)
-	}
-	return concatStringLits(expr)
 }
 
 // commentInExpr returns the first comment inside expr, or nil. Rewriting
