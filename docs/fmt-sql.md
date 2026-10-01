@@ -35,11 +35,23 @@ Use `-d` to show in the CI log what is not formatted.
 
 ### Checking staged content in a pre-commit hook
 
-To check the index rather than the working tree, pass the staged blob through standard input:
+To check the index rather than the working tree, pass the staged blob through standard input. For example, in `.git/hooks/pre-commit`:
 
 ```bash
-formatted="$(git cat-file blob "$staged_blob" | go tool go-spantool fmt-sql | git hash-object --stdin)"
-test "$formatted" = "$staged_blob" || echo "$go_file: SQL is not formatted" >&2
+#!/bin/bash
+set -o pipefail
+status=0
+while read -r go_file; do
+  staged_blob="$(git rev-parse ":$go_file")"
+  if ! formatted_blob="$(git cat-file blob "$staged_blob" | go tool go-spantool fmt-sql | git hash-object --stdin)"; then
+    echo "$go_file: fmt-sql failed on the staged content" >&2
+    status=1
+  elif [ "$formatted_blob" != "$staged_blob" ]; then
+    echo "$go_file: SQL is not formatted; run go tool go-spantool fmt-sql -w $go_file and stage it" >&2
+    status=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+exit "$status"
 ```
 
 ## Formatting rules

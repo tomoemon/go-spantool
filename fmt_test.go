@@ -398,6 +398,23 @@ func TestFmtSQLMain(t *testing.T) {
 		}
 	})
 
+	t.Run("-h exits 0 and an unknown flag exits 2", func(t *testing.T) {
+		code, stdout, stderr := run("", "-h")
+		if code != 0 || stdout != "" || !strings.Contains(stderr, "usage: go-spantool fmt-sql") {
+			t.Errorf("-h: got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if code, _, _ := run("", "-x"); code != 2 {
+			t.Errorf("-x: got code=%d, want 2", code)
+		}
+	})
+
+	t.Run("empty standard input is an error that says files can be passed", func(t *testing.T) {
+		code, stdout, stderr := run("", "-l")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "<standard input>: expected Go source on standard input, but it was empty") {
+			t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+
 	t.Run("parse error exits 1", func(t *testing.T) {
 		code, _, stderr := run("package q; func(", "-l")
 		if code != 1 || !strings.HasPrefix(stderr, "<standard input>: ") {

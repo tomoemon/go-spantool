@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -49,6 +50,9 @@ func fmtSQLMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0 // -h, as in gofmt
+		}
 		return 2
 	}
 
@@ -86,6 +90,10 @@ func processFile(name string, in io.Reader, stdout io.Writer, opt fmtSQLOptions)
 	}
 	if err != nil {
 		return err
+	}
+	if in != nil && len(src) == 0 {
+		return errors.New("expected Go source on standard input, but it was empty; " +
+			"fmt-sql reads standard input when no files are given, so pass the .go files to format")
 	}
 
 	out, err := formatGoFile(src)
