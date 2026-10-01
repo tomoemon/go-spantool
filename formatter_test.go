@@ -33,7 +33,9 @@ WHERE
 FROM
   ` + "`Subscription`" + ` s
 JOIN
-  User u ON s.TargetUserID = u.UserID
+  User u
+ON
+  s.TargetUserID = u.UserID
 WHERE
   s.SourceUserID = @sourceUserID
 ORDER BY
@@ -51,7 +53,9 @@ OFFSET
 FROM
   Comment c
 JOIN
-  Thread t ON c.ThreadID = t.ThreadID
+  Thread t
+ON
+  c.ThreadID = t.ThreadID
 WHERE
   t.ProjectID = @projectID`,
 		},
@@ -84,9 +88,13 @@ OFFSET
 FROM
   Transaction t
 LEFT JOIN
-  ChangeLog cl ON t.TransactionID = cl.TransactionID
+  ChangeLog cl
+ON
+  t.TransactionID = cl.TransactionID
 LEFT JOIN
-  Item i ON cl.ItemID = i.ItemID
+  Item i
+ON
+  cl.ItemID = i.ItemID
 WHERE
   t.UserID = @userID
 GROUP BY
@@ -194,7 +202,7 @@ FROM
   CASE t.TransactionType
     WHEN 'DEDUCTION' THEN
       CASE
-        WHEN EXISTS(
+        WHEN EXISTS (
           SELECT
             1
           FROM
@@ -202,7 +210,7 @@ FROM
           WHERE
             a.TransactionID = t.TransactionID
         ) THEN 'FILE_UPLOAD'
-        WHEN EXISTS(
+        WHEN EXISTS (
           SELECT
             1
           FROM
@@ -276,7 +284,7 @@ WHERE
 FROM
   t
 WHERE
-  id IN(
+  id IN (
     SELECT
       id
     FROM
@@ -328,7 +336,105 @@ FROM
 FROM
   A
 JOIN
-  @{JOIN_METHOD=HASH_JOIN} B ON A.id = B.id`,
+  @{JOIN_METHOD=HASH_JOIN} B
+ON
+  A.id = B.id`,
+		},
+		{
+			name:  "join ON with multiple conditions",
+			input: `SELECT a.ID FROM A AS a LEFT JOIN B AS b ON b.AID = a.ID AND b.UserID = @userID AND b.Type IN UNNEST(@types) WHERE a.UserID = @userID`,
+			want: `SELECT
+  a.ID
+FROM
+  A AS a
+LEFT JOIN
+  B AS b
+ON
+  b.AID = a.ID
+  AND b.UserID = @userID
+  AND b.Type IN UNNEST(@types)
+WHERE
+  a.UserID = @userID`,
+		},
+		{
+			name:  "EXISTS subqueries inside conditional paren",
+			input: `SELECT a.ID FROM A AS a WHERE a.UserID = @userID AND (NOT EXISTS(SELECT 1 FROM C AS c WHERE c.AID = a.ID) OR EXISTS(SELECT 1 FROM C AS c WHERE c.AID = a.ID AND c.Type IN UNNEST(@types)))`,
+			want: `SELECT
+  a.ID
+FROM
+  A AS a
+WHERE
+  a.UserID = @userID
+  AND (
+    NOT EXISTS (
+      SELECT
+        1
+      FROM
+        C AS c
+      WHERE
+        c.AID = a.ID
+    )
+    OR EXISTS (
+      SELECT
+        1
+      FROM
+        C AS c
+      WHERE
+        c.AID = a.ID
+        AND c.Type IN UNNEST(@types)
+    )
+  )`,
+		},
+		{
+			name:  "IN with value list",
+			input: `SELECT * FROM t WHERE id IN(1, 2, 3)`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  id IN (1, 2, 3)`,
+		},
+		{
+			name:  "CTE",
+			input: `WITH tmp AS (SELECT r.ID AS ID FROM R AS r) SELECT ID FROM tmp`,
+			want: `WITH tmp AS (
+  SELECT
+    r.ID AS ID
+  FROM
+    R AS r
+)
+SELECT
+  ID
+FROM
+  tmp`,
+		},
+		{
+			name:  "multiple CTEs",
+			input: `WITH t1 AS (SELECT 1 AS x), t2 AS (SELECT x FROM t1) SELECT x FROM t2`,
+			want: `WITH t1 AS (
+  SELECT
+    1 AS x
+),
+t2 AS (
+  SELECT
+    x
+  FROM
+    t1
+)
+SELECT
+  x
+FROM
+  t2`,
+		},
+		{
+			name:  "UNNEST WITH OFFSET is not a CTE",
+			input: `SELECT v, off FROM UNNEST(@vals) AS v WITH OFFSET AS off`,
+			want: `SELECT
+  v,
+  off
+FROM
+  UNNEST(@vals) AS v WITH OFFSET AS off`,
 		},
 	}
 
@@ -340,6 +446,15 @@ JOIN
 			}
 			if got != tt.want {
 				t.Errorf("FormatSQL() mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, tt.want)
+			}
+
+			// Formatting the output again must not change it
+			again, err := FormatSQL(got)
+			if err != nil {
+				t.Fatalf("FormatSQL() on formatted output error: %v", err)
+			}
+			if again != got {
+				t.Errorf("FormatSQL() is not idempotent:\n--- first ---\n%s\n--- second ---\n%s", got, again)
 			}
 		})
 	}

@@ -7,10 +7,10 @@ Formats SQL inside `spanner.Statement{SQL: ...}` literals in Go source files.
 - Newline before clause keywords (SELECT, FROM, WHERE, HAVING, LIMIT, etc.)
 - Each item in SELECT list on its own line
 - Keywords normalized to uppercase
-- AND/OR placed at the beginning of lines within WHERE/HAVING
+- AND/OR placed at the beginning of lines within WHERE/HAVING and JOIN's ON
 - JOIN modifiers grouped on one line
 - CASE/WHEN/END indentation
-- Recursive subquery formatting
+- Recursive subquery formatting (including EXISTS / IN subqueries and CTEs); the body is indented one level deeper than the line that opens it, and the closing parenthesis aligns with that line
 - SQL syntax validation via [memefish](https://github.com/cloudspannerecosystem/memefish)
 
 ## Examples
@@ -31,7 +31,9 @@ SELECT
 FROM
   User u
 LEFT JOIN
-  Subscription s ON u.UserID = s.TargetUserID
+  Subscription s
+ON
+  u.UserID = s.TargetUserID
 WHERE
   u.UserID = @userID
   AND s.SourceUserID = @sourceUserID

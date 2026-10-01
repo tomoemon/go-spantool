@@ -101,10 +101,20 @@ func needsSpace(prev, cur tok) bool {
 		return false
 	}
 	// Function call: no space before ( immediately following an identifier or keyword
-	if string(cur.kind) == "(" && (prev.kind == token.TokenIdent || isFuncKeyword(prev)) {
+	if string(cur.kind) == "(" && (prev.kind == token.TokenIdent || isFuncKeyword(prev)) && !isOperatorKeyword(prev) {
 		return false
 	}
 	return true
+}
+
+// isOperatorKeyword reports whether t is a keyword that takes a parenthesized
+// operand but reads as an operator, so a space is kept before the "(".
+func isOperatorKeyword(t tok) bool {
+	switch string(t.kind) {
+	case "EXISTS", "IN":
+		return true
+	}
+	return false
 }
 
 func isFuncKeyword(t tok) bool {
@@ -152,6 +162,7 @@ type subqueryCtx struct {
 	bodyIndent   int
 	inSelectList bool
 	inWhere      bool
+	inWith       bool
 	caseStack    []int
 }
 
@@ -166,6 +177,7 @@ func formatTokens(tokens []tok) string {
 	bodyIndent := 2
 	inSelectList := false
 	inWhere := false
+	inWith := false // inside the CTE list of a WITH clause
 	suppressSpace := false
 	hintDepth := 0
 
@@ -234,11 +246,9 @@ func formatTokens(tokens []tok) string {
 				}
 				b.WriteString("(")
 
-				// Calculate subquery indentation
-				closeInd := bodyIndent
-				if len(caseStack) > 0 {
-					closeInd = caseStack[len(caseStack)-1] + 2
-				}
+				// The closing ) aligns with the line that opened the subquery,
+				// and the body is indented one level deeper.
+				closeInd := currentLineIndent(&b)
 
 				savedCS := make([]int, len(caseStack))
 				copy(savedCS, caseStack)
@@ -249,6 +259,7 @@ func formatTokens(tokens []tok) string {
 					bodyIndent:   bodyIndent,
 					inSelectList: inSelectList,
 					inWhere:      inWhere,
+					inWith:       inWith,
 					caseStack:    savedCS,
 				})
 
@@ -256,6 +267,7 @@ func formatTokens(tokens []tok) string {
 				bodyIndent = closeInd + 4
 				inSelectList = false
 				inWhere = false
+				inWith = false
 				caseStack = nil
 				suppressSpace = true
 				continue
@@ -298,6 +310,7 @@ func formatTokens(tokens []tok) string {
 				bodyIndent = ctx.bodyIndent
 				inSelectList = ctx.inSelectList
 				inWhere = ctx.inWhere
+				inWith = ctx.inWith
 				caseStack = ctx.caseStack
 
 				depth--
@@ -382,6 +395,23 @@ func formatTokens(tokens []tok) string {
 				continue
 			}
 
+			// WITH starting a CTE list: keep `WITH name AS (` on one line
+			if isCTEStart(tokens, i) {
+				inSelectList = false
+				inWhere = false
+				inWith = true
+				if i > 0 {
+					b.WriteString("\n")
+					b.WriteString(ind(clauseIndent))
+				}
+				b.WriteString(u)
+				suppressSpace = false
+				continue
+			}
+			if inWith && isKeywordLike(t, "SELECT") {
+				inWith = false
+			}
+
 			// Regular clause keyword line breaks
 			wrote := handleClauseBreak(&b, tokens, i, u, &inSelectList, &inWhere, skip, &suppressSpace, clauseIndent, bodyIndent)
 			if wrote {
@@ -393,6 +423,14 @@ func formatTokens(tokens []tok) string {
 		if inSelectList && effectiveDepth() == 0 && len(caseStack) == 0 && string(t.kind) == "," {
 			b.WriteString(",\n")
 			b.WriteString(ind(bodyIndent))
+			suppressSpace = true
+			continue
+		}
+
+		// CTE list comma: each CTE starts on its own line
+		if inWith && effectiveDepth() == 0 && string(t.kind) == "," {
+			b.WriteString(",\n")
+			b.WriteString(ind(clauseIndent))
 			suppressSpace = true
 			continue
 		}
@@ -417,6 +455,28 @@ func formatTokens(tokens []tok) string {
 	}
 
 	return strings.TrimSpace(b.String())
+}
+
+// currentLineIndent returns the number of leading spaces on the line being written.
+func currentLineIndent(b *strings.Builder) int {
+	s := b.String()
+	line := s[strings.LastIndex(s, "\n")+1:]
+	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+// isCTEStart reports whether tokens[i] is the WITH that starts a CTE list
+// (`WITH [RECURSIVE] name AS (`), as opposed to e.g. `WITH OFFSET`.
+func isCTEStart(tokens []tok, i int) bool {
+	if !isKeywordLike(tokens[i], "WITH") {
+		return false
+	}
+	j := i + 1
+	if j < len(tokens) && isKeywordLike(tokens[j], "RECURSIVE") {
+		j++
+	}
+	return j+2 < len(tokens) &&
+		isKeywordLike(tokens[j+1], "AS") &&
+		string(tokens[j+2].kind) == "("
 }
 
 func prevNonSkipped(tokens []tok, i int, skip map[int]bool) int {
@@ -483,6 +543,17 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
+	// ON of JOIN: one condition per line, same as WHERE
+	if isKeywordLike(t, "ON") {
+		*inSelectList = false
+		*inWhere = true
+		b.WriteString(nlClause)
+		b.WriteString("ON")
+		b.WriteString(nlBody)
+		*suppressSpace = true
+		return true
+	}
+
 	// Set operators
 	if setOperators[u] {
 		*inSelectList = false
@@ -499,8 +570,8 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
-	// OFFSET
-	if strings.EqualFold(t.raw, "OFFSET") {
+	// OFFSET (but not `WITH OFFSET` of UNNEST)
+	if strings.EqualFold(t.raw, "OFFSET") && !(i > 0 && isKeywordLike(tokens[i-1], "WITH")) {
 		*inSelectList = false
 		*inWhere = false
 		b.WriteString(nlClause)
