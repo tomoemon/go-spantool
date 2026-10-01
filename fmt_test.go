@@ -64,6 +64,17 @@ var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
 				"since SQL built at run time is not supported\n  line 4: found Go comment // reserved word",
 		},
 		{
+			name: "problems are reported in source order, also in a statement nested in an earlier field",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{Params: f(
+	spanner.Statement{SQL: inner}),
+	SQL: outer}
+`,
+			wantErr: "line 4: found variable inner; the SQL field must be a string literal or string literals joined with +, " +
+				"since SQL built at run time is not supported\n  line 5: found variable outer",
+		},
+		{
 			name: "backtick literal is accepted",
 			src: `package x
 import "cloud.google.com/go/spanner"

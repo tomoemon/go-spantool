@@ -84,10 +84,6 @@ func formatGoFile(src []byte) ([]byte, error) {
 		return src, nil
 	}
 
-	// Sort fields into source order so the result is built in one pass;
-	// ast.Inspect visits a statement nested in an earlier field (e.g. Params)
-	// after the enclosing statement's SQL field
-	slices.SortFunc(fields, func(a, b sqlField) int { return cmp.Compare(a.expr.Pos(), b.expr.Pos()) })
 	var result bytes.Buffer
 	prev := 0
 	var syntaxErrors []string
@@ -124,11 +120,11 @@ type sqlField struct {
 }
 
 // collectSpannerSQLFields collects SQL fields from spanner.Statement{SQL: ...}
-// in the AST. It returns error messages for SQL fields that are neither a
-// string literal nor string literals joined with +.
+// in the AST, in source order. It returns error messages, also in source
+// order, for SQL fields that are neither a string literal nor string literals
+// joined with +, or that contain a Go comment.
 func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent string) ([]sqlField, []string) {
-	var fields []sqlField
-	var errs []string
+	var values []ast.Expr
 	ast.Inspect(file, func(n ast.Node) bool {
 		comp, ok := spannerStatementLit(n, spannerIdent)
 		if !ok {
@@ -141,26 +137,34 @@ func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent s
 				continue
 			}
 			key, ok := kv.Key.(*ast.Ident)
-			if !ok || key.Name != "SQL" {
-				continue
+			if ok && key.Name == "SQL" {
+				values = append(values, kv.Value)
 			}
-			sql, err := concatStringLits(kv.Value)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("  line %d: %v; the SQL field must be a string literal or string literals joined with +, "+
-					"since SQL built at run time is not supported", fset.Position(kv.Value.Pos()).Line, err))
-				continue
-			}
-			if c := commentInExpr(file, kv.Value); c != nil {
-				errs = append(errs, fmt.Sprintf("  line %d: found Go comment %s between the joined string literals; "+
-					"rewriting the field would drop it, so move it outside the field or into the SQL as a -- comment",
-					fset.Position(c.Pos()).Line, c.Text))
-				continue
-			}
-			fields = append(fields, sqlField{expr: kv.Value, sql: sql})
 		}
 
 		return true
 	})
+	// ast.Inspect visits a statement nested in an earlier field (e.g. Params)
+	// after the enclosing statement's SQL field
+	slices.SortFunc(values, func(a, b ast.Expr) int { return cmp.Compare(a.Pos(), b.Pos()) })
+
+	var fields []sqlField
+	var errs []string
+	for _, v := range values {
+		sql, err := concatStringLits(v)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("  line %d: %v; the SQL field must be a string literal or string literals joined with +, "+
+				"since SQL built at run time is not supported", fset.Position(v.Pos()).Line, err))
+			continue
+		}
+		if c := commentInExpr(file, v); c != nil {
+			errs = append(errs, fmt.Sprintf("  line %d: found Go comment %s between the joined string literals; "+
+				"rewriting the field would drop it, so move it outside the field or into the SQL as a -- comment",
+				fset.Position(c.Pos()).Line, c.Text))
+			continue
+		}
+		fields = append(fields, sqlField{expr: v, sql: sql})
+	}
 	return fields, errs
 }
 
