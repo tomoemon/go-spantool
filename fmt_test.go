@@ -17,7 +17,7 @@ func TestFormatGoFile_rejectNonLiteralSQL(t *testing.T) {
 import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: sql}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: "line 3: found variable sql",
 		},
 		{
 			name: "function call",
@@ -25,15 +25,54 @@ var _ = spanner.Statement{SQL: sql}
 import "cloud.google.com/go/spanner"
 var _ = spanner.Statement{SQL: buildSQL()}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: "line 3: found function call buildSQL()",
 		},
 		{
-			name: "double-quoted string is rejected",
+			name: "concatenation with a variable is rejected",
 			src: `package x
 import "cloud.google.com/go/spanner"
-var _ = spanner.Statement{SQL: "SELECT 1"}
+var _ = spanner.Statement{SQL: "SELECT * FROM " + table}
 `,
-			wantErr: "SQL field must be a backtick string literal",
+			wantErr: "line 3: found variable table",
+		},
+		{
+			name: "concatenation with a function call is rejected",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + fmt.Sprintf("%s", t)}
+`,
+			wantErr: `line 3: found function call fmt.Sprintf("%s", t)`,
+		},
+		{
+			name: "comment inside joined string literals is rejected, not dropped",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
+	"` + "`Following`" + `"}
+`,
+			wantErr: "line 3: found Go comment // reserved word",
+		},
+		{
+			name: "all problems are reported together",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{SQL: sql}
+var _ = spanner.Statement{SQL: ` + "`SELECT * FROM `" + ` + // reserved word
+	"` + "`Following`" + `"}
+`,
+			wantErr: "line 3: found variable sql; the SQL field must be a string literal or string literals joined with +, " +
+				"since SQL built at run time is not supported\n  line 4: found Go comment // reserved word",
+		},
+		{
+			name: "problems are reported in source order, also in a statement nested in an earlier field",
+			src: `package x
+import "cloud.google.com/go/spanner"
+var _ = spanner.Statement{Params: f(
+	spanner.Statement{SQL: inner}),
+	SQL: outer}
+`,
+			wantErr: "line 4: found variable inner; the SQL field must be a string literal or string literals joined with +, " +
+				"since SQL built at run time is not supported\n  line 5: found variable outer",
 		},
 		{
 			name: "backtick literal is accepted",
@@ -59,6 +98,189 @@ var _ = spanner.Statement{SQL: ` + "`SELECT 1`" + `}
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFormatGoFile_concatenatedSQL(t *testing.T) {
+	// ‵ stands for a backtick, which a raw string cannot contain
+	tests := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "double-quoted string literal is rewritten as a backtick string literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT a FROM t"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  a
+FROM
+  t
+‵}
+`,
+		},
+		{
+			name: "double-quoted string literal with a backtick-quoted identifier",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT FromUserID FROM ‵Following‵ WHERE FromUserID = @fromUserID"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  FromUserID
+FROM
+  ‵ + "‵Following‵" + ‵
+WHERE
+  FromUserID = @fromUserID
+‵}
+`,
+		},
+		{
+			name: "backtick-quoted identifier is kept as a double-quoted literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{
+	SQL: ‵select FromUserID from ‵ + "‵Following‵" + ‵ where FromUserID = @fromUserID‵,
+}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{
+	SQL: ‵
+SELECT
+  FromUserID
+FROM
+  ‵ + "‵Following‵" + ‵
+WHERE
+  FromUserID = @fromUserID
+‵,
+}
+`,
+		},
+		{
+			name: "string literals without backtick-quoted identifiers become one literal",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT a " + "FROM t"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  a
+FROM
+  t
+‵}
+`,
+		},
+		{
+			name: "several backtick-quoted identifiers",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT f." + "‵Order‵" + " FROM " + "‵Following‵" + " f"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  f.‵ + "‵Order‵" + ‵
+FROM
+  ‵ + "‵Following‵" + ‵ f
+‵}
+`,
+		},
+		{
+			name: "characters a raw string cannot hold are kept as double-quoted literals",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: "SELECT 'a\rb', 'c\x00d' FROM " + "‵Following‵"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{SQL: ‵
+SELECT
+  'a‵ + "\r" + ‵b',
+  'c‵ + "\x00" + ‵d'
+FROM
+  ‵ + "‵Following‵" + ‵
+‵}
+`,
+		},
+		{
+			name: "statement nested in a field before SQL",
+			src: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{Params: f(spanner.Statement{SQL: ‵select 2‵}), SQL: ‵select 1 from ‵ + "‵Order‵"}
+`,
+			want: `package x
+
+import "cloud.google.com/go/spanner"
+
+var stmt = spanner.Statement{Params: f(spanner.Statement{SQL: ‵
+SELECT
+  2
+‵}), SQL: ‵
+SELECT
+  1
+FROM
+  ‵ + "‵Order‵" + ‵
+‵}
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := strings.ReplaceAll(tt.src, "‵", "`")
+			want := strings.ReplaceAll(tt.want, "‵", "`")
+			got, err := formatGoFile([]byte(src))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(got) != want {
+				t.Fatalf("mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
+			again, err := formatGoFile(got)
+			if err != nil {
+				t.Fatalf("unexpected error on formatted source: %v", err)
+			}
+			if string(again) != string(got) {
+				t.Errorf("not idempotent:\n%s", again)
 			}
 		})
 	}

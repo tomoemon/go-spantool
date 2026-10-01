@@ -56,17 +56,34 @@ OFFSET
 
 ## Limitations
 
-SQL must be a backtick string literal:
+SQL must be a string literal, or string literals joined with `+`. When rewriting, fmt-sql writes the SQL as a backtick string literal:
 
 ```go
-spanner.Statement{SQL: `SELECT 1`}  // accepted
+spanner.Statement{SQL: `SELECT 1`}              // accepted
+spanner.Statement{SQL: "SELECT 1"}              // accepted, rewritten as a backtick string literal
+spanner.Statement{SQL: "SELECT 1 " + "FROM t"}  // accepted, rewritten as one backtick string literal
 ```
 
-Double-quoted strings and variables are not supported:
+A raw string cannot contain a backtick, so backtick-quoted identifiers (e.g. a table named like a reserved keyword) are written as double-quoted literals joined with `+`:
 
 ```go
-spanner.Statement{SQL: "SELECT 1"}   // rejected: must be a backtick string literal
-spanner.Statement{SQL: buildSQL()}   // rejected: must be a backtick string literal
+spanner.Statement{SQL: `
+SELECT
+  FromUserID
+FROM
+  ` + "`Following`" + `
+WHERE
+  FromUserID = @fromUserID
+`}  // accepted
+```
+
+Go comments between the joined literals are reported as an error, since rewriting the field would drop them; put them outside the field, or into the SQL as `--` comments.
+
+Expressions that are not string literals (variables, function calls) are not supported, so that SQL is never built at run time:
+
+```go
+spanner.Statement{SQL: buildSQL()}                  // rejected: found function call buildSQL()
+spanner.Statement{SQL: "SELECT * FROM " + table}    // rejected: found variable table
 ```
 
 Graph queries (`GRAPH ... MATCH ...`) are kept as written.

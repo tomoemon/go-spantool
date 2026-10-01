@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -9,7 +10,10 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func runFmtSQL(args []string) {
@@ -67,78 +71,63 @@ func formatGoFile(src []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Collect SQL fields from spanner.Statement{SQL: `...`} literals
+	// Collect SQL fields from spanner.Statement{SQL: ...} literals
 	spannerIdent := spannerLocalName(file)
 	if spannerIdent == "" {
 		return src, nil
 	}
-	sqlLits, litErrors := collectSpannerSQLLits(fset, file, spannerIdent)
-	if len(litErrors) > 0 {
-		return nil, fmt.Errorf("spanner.Statement SQL field must be a backtick string literal:\n%s", strings.Join(litErrors, "\n"))
+	fields, fieldErrors := collectSpannerSQLFields(fset, file, spannerIdent)
+	if len(fieldErrors) > 0 {
+		return nil, fmt.Errorf("cannot format spanner.Statement SQL fields:\n%s", strings.Join(fieldErrors, "\n"))
 	}
-	if len(sqlLits) == 0 {
+	if len(fields) == 0 {
 		return src, nil
 	}
 
-	result := make([]byte, len(src))
-	copy(result, src)
-	offset := 0
+	var result bytes.Buffer
+	prev := 0
 	var syntaxErrors []string
 
-	for _, lit := range sqlLits {
-		raw := lit.Value
-		if len(raw) < 2 || raw[0] != '`' || raw[len(raw)-1] != '`' {
-			continue
-		}
-
-		inner := raw[1 : len(raw)-1]
-		formatted, fmtErr := FormatSQL(strings.TrimSpace(inner))
+	for _, f := range fields {
+		start := fset.Position(f.expr.Pos())
+		formatted, fmtErr := FormatSQL(strings.TrimSpace(f.sql))
 		if fmtErr != nil {
-			pos := fset.Position(lit.Pos())
-			syntaxErrors = append(syntaxErrors, fmt.Sprintf("  line %d: %v", pos.Line, fmtErr))
+			syntaxErrors = append(syntaxErrors, fmt.Sprintf("  line %d: %v", start.Line, fmtErr))
 			continue
 		}
-
-		newLit := "`\n" + formatted + "\n`"
-		if newLit == raw {
-			continue
+		newExpr := sqlFieldExpr(formatted)
+		if err := verifySQLFieldExpr(newExpr, formatted); err != nil {
+			return nil, fmt.Errorf("line %d: %w", start.Line, err)
 		}
-
-		start := fset.Position(lit.Pos()).Offset + offset
-		end := fset.Position(lit.End()).Offset + offset
-		newResult := make([]byte, len(result[:start])+len(newLit)+len(result[end:]))
-		copy(newResult, result[:start])
-		copy(newResult[start:], newLit)
-		copy(newResult[start+len(newLit):], result[end:])
-		offset += len(newLit) - (end - start)
-		result = newResult
+		end := fset.Position(f.expr.End()).Offset
+		result.Write(src[prev:start.Offset])
+		result.WriteString(newExpr)
+		prev = end
 	}
+	result.Write(src[prev:])
 
 	if len(syntaxErrors) > 0 {
 		return nil, fmt.Errorf("SQL syntax errors:\n%s", strings.Join(syntaxErrors, "\n"))
 	}
 
-	return format.Source(result)
+	return format.Source(result.Bytes())
 }
 
-// collectSpannerSQLLits collects SQL values from spanner.Statement{SQL: `...`}
-// in the AST. It returns error messages if any SQL field is not a backtick
-// string literal.
-func collectSpannerSQLLits(fset *token.FileSet, file *ast.File, spannerIdent string) ([]*ast.BasicLit, []string) {
-	var lits []*ast.BasicLit
-	var errs []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		comp, ok := n.(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
+// sqlField is the SQL field of a spanner.Statement literal.
+type sqlField struct {
+	expr ast.Expr // a string literal, or string literals joined with +
+	sql  string   // the SQL that expr evaluates to
+}
 
-		sel, ok := comp.Type.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Statement" {
-			return true
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != spannerIdent {
+// collectSpannerSQLFields collects SQL fields from spanner.Statement{SQL: ...}
+// in the AST, in source order. It returns error messages, also in source
+// order, for SQL fields that are neither a string literal nor string literals
+// joined with +, or that contain a Go comment.
+func collectSpannerSQLFields(fset *token.FileSet, file *ast.File, spannerIdent string) ([]sqlField, []string) {
+	var values []ast.Expr
+	ast.Inspect(file, func(n ast.Node) bool {
+		comp, ok := spannerStatementLit(n, spannerIdent)
+		if !ok {
 			return true
 		}
 
@@ -148,19 +137,102 @@ func collectSpannerSQLLits(fset *token.FileSet, file *ast.File, spannerIdent str
 				continue
 			}
 			key, ok := kv.Key.(*ast.Ident)
-			if !ok || key.Name != "SQL" {
-				continue
+			if ok && key.Name == "SQL" {
+				values = append(values, kv.Value)
 			}
-			lit, ok := kv.Value.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING || len(lit.Value) < 2 || lit.Value[0] != '`' {
-				pos := fset.Position(kv.Value.Pos())
-				errs = append(errs, fmt.Sprintf("  line %d: SQL field must be a backtick string literal", pos.Line))
-				continue
-			}
-			lits = append(lits, lit)
 		}
 
 		return true
 	})
-	return lits, errs
+	// ast.Inspect visits a statement nested in an earlier field (e.g. Params)
+	// after the enclosing statement's SQL field
+	slices.SortFunc(values, func(a, b ast.Expr) int { return cmp.Compare(a.Pos(), b.Pos()) })
+
+	var fields []sqlField
+	var errs []string
+	for _, v := range values {
+		sql, err := concatStringLits(v)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("  line %d: %v; the SQL field must be a string literal or string literals joined with +, "+
+				"since SQL built at run time is not supported", fset.Position(v.Pos()).Line, err))
+			continue
+		}
+		if c := commentInExpr(file, v); c != nil {
+			errs = append(errs, fmt.Sprintf("  line %d: found Go comment %s between the joined string literals; "+
+				"rewriting the field would drop it, so move it outside the field or into the SQL as a -- comment",
+				fset.Position(c.Pos()).Line, c.Text))
+			continue
+		}
+		fields = append(fields, sqlField{expr: v, sql: sql})
+	}
+	return fields, errs
+}
+
+// commentInExpr returns the first comment inside expr, or nil. Rewriting
+// expr would drop it.
+func commentInExpr(file *ast.File, expr ast.Expr) *ast.Comment {
+	for _, cg := range file.Comments {
+		if cg.Pos() > expr.Pos() && cg.End() < expr.End() {
+			return cg.List[0]
+		}
+	}
+	return nil
+}
+
+// sqlFieldExpr returns the Go expression for an SQL field holding sql: a
+// backtick string literal starting and ending with a newline. A raw string
+// cannot contain a backtick, so backtick-quoted parts such as `Following` are
+// written as double-quoted string literals joined with +, as are other
+// characters a raw string cannot hold as is (see indexNotRaw).
+func sqlFieldExpr(sql string) string {
+	text := "\n" + sql + "\n"
+	var parts []string
+	for {
+		i, size := indexNotRaw(text)
+		if i < 0 {
+			return strings.Join(append(parts, "`"+text+"`"), " + ")
+		}
+		if i > 0 {
+			parts = append(parts, "`"+text[:i]+"`")
+		}
+		// A backtick-quoted identifier ends on the same line; a lone
+		// backtick (e.g. in a comment) is written by itself
+		quoted := text[i : i+size]
+		if text[i] == '`' {
+			if j := strings.IndexAny(text[i+1:], "`\n"); j >= 0 && text[i+1+j] == '`' {
+				quoted = text[i : i+j+2]
+			}
+		}
+		parts = append(parts, strconv.Quote(quoted))
+		text = text[i+len(quoted):]
+	}
+}
+
+// indexNotRaw returns the index and size of the first character in s that a
+// raw string literal cannot hold as is, or -1: a backtick, a carriage return
+// (dropped from raw strings), NUL, a byte order mark, or invalid UTF-8.
+func indexNotRaw(s string) (int, int) {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == '`' || r == '\r' || r == 0 || r == '\uFEFF' || (r == utf8.RuneError && size == 1) {
+			return i, size
+		}
+		i += size
+	}
+	return -1, 0
+}
+
+// verifySQLFieldExpr checks that the Go expression written for an SQL field
+// evaluates to the formatted SQL, so that a rewrite never changes the query.
+func verifySQLFieldExpr(expr, formatted string) error {
+	want := "\n" + formatted + "\n"
+	e, err := parser.ParseExpr(expr)
+	if err != nil {
+		return fmt.Errorf("the rewritten SQL field is not a valid Go expression (%v); %s\nexpression: %s", err, reportBug, expr)
+	}
+	got, err := concatStringLits(e)
+	if err != nil || got != want {
+		return fmt.Errorf("the rewritten SQL field does not evaluate to the formatted SQL; %s\nexpected: %q\nactual:   %q", reportBug, want, got)
+	}
+	return nil
 }
