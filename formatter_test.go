@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/cloudspannerecosystem/memefish"
 )
 
 func TestFormatSQL(t *testing.T) {
@@ -934,5 +937,21 @@ func TestFormatSQL_SyntaxError(t *testing.T) {
 	_, err := FormatSQL("SELEC 10")
 	if err == nil {
 		t.Fatal("expected syntax error but got nil")
+	}
+}
+
+func TestVerifyEquivalent(t *testing.T) {
+	orig, err := memefish.ParseStatement("", "SELECT a FROM t WHERE a = 1 AND b = 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEquivalent(orig, "SELECT\n  a\nFROM\n  t\nWHERE\n  a = 1\n  AND b = 2"); err != nil {
+		t.Errorf("expected equivalent SQL to pass, got: %v", err)
+	}
+	if err := verifyEquivalent(orig, "SELECT a FROM t WHERE a = 1 OR b = 2"); err == nil || !strings.Contains(err.Error(), "changed the meaning") {
+		t.Errorf("expected meaning change to be detected, got: %v", err)
+	}
+	if err := verifyEquivalent(orig, "SELECT a FROM"); err == nil || !strings.Contains(err.Error(), "no longer valid") {
+		t.Errorf("expected invalid SQL to be detected, got: %v", err)
 	}
 }

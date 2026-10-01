@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/cloudspannerecosystem/memefish"
+	"github.com/cloudspannerecosystem/memefish/ast"
 	"github.com/cloudspannerecosystem/memefish/token"
 )
 
@@ -12,7 +14,8 @@ import (
 // keywords to uppercase. It also validates SQL syntax and returns an error if
 // the SQL is malformed.
 func FormatSQL(sql string) (string, error) {
-	if _, err := memefish.ParseStatement("", sql); err != nil {
+	stmt, err := memefish.ParseStatement("", sql)
+	if err != nil {
 		return "", err
 	}
 
@@ -20,7 +23,25 @@ func FormatSQL(sql string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return formatTokens(tokens), nil
+	formatted := formatTokens(tokens)
+	if err := verifyEquivalent(stmt, formatted); err != nil {
+		return "", err
+	}
+	return formatted, nil
+}
+
+// verifyEquivalent checks that formatting did not change the meaning of the
+// SQL, by comparing the canonical SQL of the original and formatted statements.
+func verifyEquivalent(orig ast.Statement, formatted string) error {
+	const report = "this is a fmt-sql bug; please report it with the SQL at https://github.com/tomoemon/go-spantool/issues"
+	stmt, err := memefish.ParseStatement("", formatted)
+	if err != nil {
+		return fmt.Errorf("formatted SQL is no longer valid (%v); %s\nformatted SQL:\n%s", err, report, formatted)
+	}
+	if want, got := orig.SQL(), stmt.SQL(); want != got {
+		return fmt.Errorf("formatting changed the meaning of the SQL; %s\nexpected: %s\nactual:   %s", report, want, got)
+	}
+	return nil
 }
 
 type tok struct {
