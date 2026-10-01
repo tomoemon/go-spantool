@@ -53,7 +53,7 @@ func tokenize(sql string) ([]tok, error) {
 var clauseKeywords = map[string]bool{
 	"SELECT": true, "FROM": true, "WHERE": true, "HAVING": true,
 	"LIMIT": true, "SET": true, "INTO": true,
-	"VALUES": true, "RETURNING": true,
+	"VALUES": true, "RETURNING": true, "ON": true,
 }
 
 var joinModifiers = map[string]bool{
@@ -101,25 +101,19 @@ func needsSpace(prev, cur tok) bool {
 		return false
 	}
 	// Function call: no space before ( immediately following an identifier or keyword
-	if string(cur.kind) == "(" && (prev.kind == token.TokenIdent || isFuncKeyword(prev)) && !isOperatorKeyword(prev) {
+	if string(cur.kind) == "(" && (prev.kind == token.TokenIdent || isFuncKeyword(prev)) {
+		return false
+	}
+	// Array subscript: no space before [ following an operand
+	if string(cur.kind) == "[" && (prev.kind == token.TokenIdent || string(prev.kind) == ")" || string(prev.kind) == "]") {
 		return false
 	}
 	return true
 }
 
-// isOperatorKeyword reports whether t is a keyword that takes a parenthesized
-// operand but reads as an operator, so a space is kept before the "(".
-func isOperatorKeyword(t tok) bool {
-	switch string(t.kind) {
-	case "EXISTS", "IN":
-		return true
-	}
-	return false
-}
-
 func isFuncKeyword(t tok) bool {
 	switch string(t.kind) {
-	case "CAST", "EXTRACT", "EXISTS", "ARRAY", "STRUCT", "UNNEST", "IN":
+	case "CAST", "EXTRACT", "ARRAY", "STRUCT", "UNNEST":
 		return true
 	}
 	// COUNT, SUM, COALESCE, etc. are treated as identifiers, not keywords
@@ -162,7 +156,6 @@ type subqueryCtx struct {
 	bodyIndent   int
 	inSelectList bool
 	inWhere      bool
-	inWith       bool
 	caseStack    []int
 }
 
@@ -177,7 +170,6 @@ func formatTokens(tokens []tok) string {
 	bodyIndent := 2
 	inSelectList := false
 	inWhere := false
-	inWith := false // inside the CTE list of a WITH clause
 	suppressSpace := false
 	hintDepth := 0
 
@@ -259,7 +251,6 @@ func formatTokens(tokens []tok) string {
 					bodyIndent:   bodyIndent,
 					inSelectList: inSelectList,
 					inWhere:      inWhere,
-					inWith:       inWith,
 					caseStack:    savedCS,
 				})
 
@@ -267,7 +258,6 @@ func formatTokens(tokens []tok) string {
 				bodyIndent = closeInd + 4
 				inSelectList = false
 				inWhere = false
-				inWith = false
 				caseStack = nil
 				suppressSpace = true
 				continue
@@ -310,7 +300,6 @@ func formatTokens(tokens []tok) string {
 				bodyIndent = ctx.bodyIndent
 				inSelectList = ctx.inSelectList
 				inWhere = ctx.inWhere
-				inWith = ctx.inWith
 				caseStack = ctx.caseStack
 
 				depth--
@@ -399,7 +388,6 @@ func formatTokens(tokens []tok) string {
 			if isCTEStart(tokens, i) {
 				inSelectList = false
 				inWhere = false
-				inWith = true
 				if i > 0 {
 					b.WriteString("\n")
 					b.WriteString(ind(clauseIndent))
@@ -407,9 +395,6 @@ func formatTokens(tokens []tok) string {
 				b.WriteString(u)
 				suppressSpace = false
 				continue
-			}
-			if inWith && isKeywordLike(t, "SELECT") {
-				inWith = false
 			}
 
 			// Regular clause keyword line breaks
@@ -428,7 +413,7 @@ func formatTokens(tokens []tok) string {
 		}
 
 		// CTE list comma: each CTE starts on its own line
-		if inWith && effectiveDepth() == 0 && string(t.kind) == "," {
+		if effectiveDepth() == 0 && string(t.kind) == "," && isCTEHead(tokens, i+1) {
 			b.WriteString(",\n")
 			b.WriteString(ind(clauseIndent))
 			suppressSpace = true
@@ -474,6 +459,11 @@ func isCTEStart(tokens []tok, i int) bool {
 	if j < len(tokens) && isKeywordLike(tokens[j], "RECURSIVE") {
 		j++
 	}
+	return isCTEHead(tokens, j)
+}
+
+// isCTEHead reports whether tokens[j:] starts with `name AS (`.
+func isCTEHead(tokens []tok, j int) bool {
 	return j+2 < len(tokens) &&
 		isKeywordLike(tokens[j+1], "AS") &&
 		string(tokens[j+2].kind) == "("
@@ -543,17 +533,6 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
-	// ON of JOIN: one condition per line, same as WHERE
-	if isKeywordLike(t, "ON") {
-		*inSelectList = false
-		*inWhere = true
-		b.WriteString(nlClause)
-		b.WriteString("ON")
-		b.WriteString(nlBody)
-		*suppressSpace = true
-		return true
-	}
-
 	// Set operators
 	if setOperators[u] {
 		*inSelectList = false
@@ -570,8 +549,8 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
-	// OFFSET (but not `WITH OFFSET` of UNNEST)
-	if strings.EqualFold(t.raw, "OFFSET") && !(i > 0 && isKeywordLike(tokens[i-1], "WITH")) {
+	// OFFSET following LIMIT (not `WITH OFFSET` or `arr[OFFSET(0)]`)
+	if strings.EqualFold(t.raw, "OFFSET") && inLimitClause(tokens, i) {
 		*inSelectList = false
 		*inWhere = false
 		b.WriteString(nlClause)
@@ -594,7 +573,7 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 			}
 			b.WriteString(u)
 			b.WriteString(nlBody)
-		case "WHERE", "HAVING":
+		case "WHERE", "HAVING", "ON":
 			*inSelectList = false
 			*inWhere = true
 			b.WriteString(nlClause)
@@ -611,6 +590,27 @@ func handleClauseBreak(b *strings.Builder, tokens []tok, i int, u string, inSele
 		return true
 	}
 
+	return false
+}
+
+// inLimitClause reports whether tokens[i] is inside a LIMIT clause, by
+// scanning back at the same parenthesis depth for the nearest clause keyword.
+func inLimitClause(tokens []tok, i int) bool {
+	d := 0
+	for j := i - 1; j >= 0; j-- {
+		switch string(tokens[j].kind) {
+		case ")", "]":
+			d++
+		case "(", "[":
+			if d == 0 {
+				return false
+			}
+			d--
+		}
+		if d == 0 && clauseKeywords[upper(tokens[j])] {
+			return upper(tokens[j]) == "LIMIT"
+		}
+	}
 	return false
 }
 

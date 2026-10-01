@@ -436,6 +436,29 @@ FROM
 FROM
   UNNEST(@vals) AS v WITH OFFSET AS off`,
 		},
+		{
+			name:  "array subscript OFFSET is not a clause",
+			input: `SELECT a[OFFSET(0)], b[SAFE_OFFSET(1)] FROM t LIMIT 1 OFFSET 2`,
+			want: `SELECT
+  a[OFFSET(0)],
+  b[SAFE_OFFSET(1)]
+FROM
+  t
+LIMIT
+  1
+OFFSET
+  2`,
+		},
+		{
+			name:  "array literal keeps space before [",
+			input: `SELECT * FROM t WHERE a = [1, 2]`,
+			want: `SELECT
+  *
+FROM
+  t
+WHERE
+  a = [1, 2]`,
+		},
 	}
 
 	for _, tt := range tests {
