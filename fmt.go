@@ -45,8 +45,8 @@ func fmtSQLMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.list, "l", false, "list files whose formatting differs from fmt-sql's")
 	fs.BoolVar(&opt.diff, "d", false, "display diffs instead of rewriting files")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: go-spantool fmt-sql [-l] [-d] [-w] [file.go ...]")
-		fmt.Fprintln(stderr, "With no files, or with -, reads Go source from standard input.")
+		_, _ = fmt.Fprintln(stderr, "usage: go-spantool fmt-sql [-l] [-d] [-w] [file.go ...]")
+		_, _ = fmt.Fprintln(stderr, "With no files, or with -, reads Go source from standard input.")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -67,7 +67,7 @@ func fmtSQLMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			err = processFile(path, stdout, opt)
 		}
 		if err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", path, err)
+			_, _ = fmt.Fprintf(stderr, "%s: %v\n", path, err)
 			exitCode = 1
 		}
 	}
@@ -121,7 +121,9 @@ func processFile(path string, stdout io.Writer, opt fmtSQLOptions) error {
 		return os.WriteFile(path, out, info.Mode())
 	}
 	if !opt.list && !opt.diff {
-		fmt.Fprintf(stdout, "--- %s\n", path)
+		if _, err := fmt.Fprintf(stdout, "--- %s\n", path); err != nil {
+			return err
+		}
 		_, err = stdout.Write(out)
 	}
 	return err
