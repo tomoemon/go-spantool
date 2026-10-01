@@ -2,7 +2,10 @@ module github.com/tomoemon/go-spantool
 
 go 1.26.0
 
-require github.com/cloudspannerecosystem/memefish v0.8.1
+require (
+	github.com/cloudspannerecosystem/memefish v0.8.1
+	github.com/hexops/gotextdiff v1.0.3
+)
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
@@ -100,7 +103,6 @@ require (
 	github.com/hashicorp/go-version v1.8.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/hexops/gotextdiff v1.0.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jgautheron/goconst v1.8.2 // indirect
 	github.com/jingyugao/rowserrcheck v1.1.1 // indirect

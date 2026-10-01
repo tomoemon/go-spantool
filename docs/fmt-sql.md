@@ -2,6 +2,46 @@
 
 Formats SQL inside `spanner.Statement{SQL: ...}` literals in Go source files.
 
+## Usage
+
+```
+go tool go-spantool fmt-sql [-l] [-d] [-w] [file.go ...]
+```
+
+| Flag | Description |
+|---|---|
+| (none) | Print each file whose formatting changes, after a `--- <path>` header |
+| `-l` | Print only the paths of files whose formatting changes, one per line |
+| `-d` | Print a unified diff of the changes |
+| `-w` | Write the result back to the files |
+
+Flags can be combined, as in gofmt (e.g. `-l -w` lists the files it rewrites).
+
+With no files, or with `-`, fmt-sql reads Go source from standard input and writes the formatted source to standard output; source without SQL fields is written as is. `-w` cannot be used with standard input, and `-l` / `-d` name it `<standard input>`.
+
+As in gofmt, the exit code is 0 even when files are not formatted; it is non-zero only on errors such as a Go or SQL syntax error.
+
+### Checking formatting in CI
+
+`-l` prints nothing when every file is formatted:
+
+```make
+sqlfmt-check:
+	@files="$$(go tool go-spantool fmt-sql -l ./path/to/*.go)" || exit 1; \
+	test -z "$$files" || { echo "$$files" >&2; exit 1; }
+```
+
+Use `-d` to show in the CI log what is not formatted.
+
+### Checking staged content in a pre-commit hook
+
+To check the index rather than the working tree, pass the staged blob through standard input:
+
+```bash
+formatted="$(git cat-file blob "$staged_blob" | go tool go-spantool fmt-sql | git hash-object --stdin)"
+test "$formatted" = "$staged_blob" || echo "$go_file: SQL is not formatted" >&2
+```
+
 ## Formatting rules
 
 - Newline before clause keywords (SELECT, FROM, WHERE, HAVING, LIMIT, etc.)

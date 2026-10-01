@@ -87,6 +87,13 @@ go tool go-spantool fmt-sql ./path/to/*.go
 
 # Write changes back to files
 go tool go-spantool fmt-sql -w ./path/to/*.go
+
+# List files whose formatting changes (for CI checks), or show a diff
+go tool go-spantool fmt-sql -l ./path/to/*.go
+go tool go-spantool fmt-sql -d ./path/to/*.go
+
+# Read Go source from standard input
+git cat-file blob "$sha" | go tool go-spantool fmt-sql
 ```
 
 ## Testing

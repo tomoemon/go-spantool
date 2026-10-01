@@ -9,34 +9,93 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/hexops/gotextdiff"
+	"github.com/hexops/gotextdiff/myers"
+	"github.com/hexops/gotextdiff/span"
 )
 
 func runFmtSQL(args []string) {
-	fs := flag.NewFlagSet("fmt-sql", flag.ExitOnError)
-	write := fs.Bool("w", false, "write result to (source) file instead of stdout")
-	_ = fs.Parse(args)
+	os.Exit(fmtSQLMain(args, os.Stdin, os.Stdout, os.Stderr))
+}
 
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: go-spantool fmt-sql [-w] file.go ...")
-		os.Exit(1)
+// fmtSQLOptions are the output modes of fmt-sql. They can be combined, as in gofmt.
+type fmtSQLOptions struct {
+	write bool // write the result back to the file
+	list  bool // print the paths of files whose formatting differs
+	diff  bool // print a unified diff of the changes
+}
+
+// stdinName is how standard input is named in the -l and -d output, as in gofmt.
+const stdinName = "<standard input>"
+
+// fmtSQLMain runs fmt-sql and returns the exit code. With no files (or "-"),
+// it reads Go source from stdin and writes the result to stdout.
+func fmtSQLMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fmt-sql", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var opt fmtSQLOptions
+	fs.BoolVar(&opt.write, "w", false, "write result to (source) file instead of stdout")
+	fs.BoolVar(&opt.list, "l", false, "list files whose formatting differs from fmt-sql's")
+	fs.BoolVar(&opt.diff, "d", false, "display diffs instead of rewriting files")
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: go-spantool fmt-sql [-l] [-d] [-w] [file.go ...]")
+		fmt.Fprintln(stderr, "With no files, or with -, reads Go source from standard input.")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
 	}
 
+	paths := fs.Args()
+	if len(paths) == 0 {
+		paths = []string{"-"}
+	}
 	exitCode := 0
-	for _, path := range fs.Args() {
-		if err := processFile(path, *write); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
+	for _, path := range paths {
+		var err error
+		if path == "-" {
+			err = processStdin(stdin, stdout, opt)
+			path = stdinName
+		} else {
+			err = processFile(path, stdout, opt)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", path, err)
 			exitCode = 1
 		}
 	}
-	os.Exit(exitCode)
+	return exitCode
 }
 
-func processFile(path string, write bool) error {
+func processStdin(stdin io.Reader, stdout io.Writer, opt fmtSQLOptions) error {
+	if opt.write {
+		return fmt.Errorf("-w cannot be used with standard input, as there is no file to write back to; " +
+			"omit -w to print the formatted source to standard output")
+	}
+	src, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	out, err := formatGoFile(src)
+	if err != nil {
+		return err
+	}
+	if !opt.list && !opt.diff {
+		// Like gofmt, print the result even when nothing changed
+		_, err = stdout.Write(out)
+		return err
+	}
+	return report(stdout, stdinName, src, out, opt)
+}
+
+func processFile(path string, stdout io.Writer, opt fmtSQLOptions) error {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -51,17 +110,42 @@ func processFile(path string, write bool) error {
 		return nil
 	}
 
-	if write {
+	if err := report(stdout, path, src, out, opt); err != nil {
+		return err
+	}
+	if opt.write {
 		info, err := os.Stat(path)
 		if err != nil {
 			return err
 		}
 		return os.WriteFile(path, out, info.Mode())
 	}
-
-	fmt.Printf("--- %s\n", path)
-	_, err = os.Stdout.Write(out)
+	if !opt.list && !opt.diff {
+		fmt.Fprintf(stdout, "--- %s\n", path)
+		_, err = stdout.Write(out)
+	}
 	return err
+}
+
+// report prints the -l and -d output for a file whose formatting changed from
+// src to out.
+func report(stdout io.Writer, name string, src, out []byte, opt fmtSQLOptions) error {
+	if bytes.Equal(src, out) {
+		return nil
+	}
+	if opt.list {
+		if _, err := fmt.Fprintln(stdout, name); err != nil {
+			return err
+		}
+	}
+	if opt.diff {
+		before, after := string(src), string(out)
+		edits := myers.ComputeEdits(span.URIFromPath(name), before, after)
+		if _, err := fmt.Fprint(stdout, gotextdiff.ToUnified(name+".orig", name, before, edits)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func formatGoFile(src []byte) ([]byte, error) {
