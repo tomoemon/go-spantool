@@ -390,9 +390,11 @@ func TestFmtSQLMain(t *testing.T) {
 	})
 
 	t.Run("-w with standard input is an error", func(t *testing.T) {
-		code, stdout, stderr := run(unformatted, "-w")
-		if code != 1 || stdout != "" || !strings.Contains(stderr, "-w cannot be used with standard input") {
-			t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		for _, in := range []string{unformatted, formatted} {
+			code, stdout, stderr := run(in, "-w")
+			if code != 1 || stdout != "" || !strings.Contains(stderr, "<standard input>: -w cannot be used with standard input") {
+				t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			}
 		}
 	})
 
