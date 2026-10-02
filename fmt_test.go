@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -284,4 +286,139 @@ FROM
 			}
 		})
 	}
+}
+
+func TestFmtSQLMain(t *testing.T) {
+	const unformatted = "package q\n\nimport \"cloud.google.com/go/spanner\"\n\nvar stmt = spanner.Statement{SQL: `select a from t`}\n"
+	const formatted = "package q\n\nimport \"cloud.google.com/go/spanner\"\n\nvar stmt = spanner.Statement{SQL: `\nSELECT\n  a\nFROM\n  t\n`}\n"
+	const noSQL = "package q\n\nfunc f() {}\n"
+
+	// setup writes bad.go (unformatted) and good.go (formatted) into a temp
+	// directory and returns their paths.
+	setup := func(t *testing.T) (bad, good string) {
+		t.Helper()
+		dir := t.TempDir()
+		bad, good = filepath.Join(dir, "bad.go"), filepath.Join(dir, "good.go")
+		if err := os.WriteFile(bad, []byte(unformatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(good, []byte(formatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bad, good
+	}
+	run := func(stdin string, args ...string) (code int, stdout, stderr string) {
+		var out, errOut strings.Builder
+		code = fmtSQLMain(args, strings.NewReader(stdin), &out, &errOut)
+		return code, out.String(), errOut.String()
+	}
+	readFile := func(t *testing.T, path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	t.Run("-l lists only unformatted files and exits 0", func(t *testing.T) {
+		bad, good := setup(t)
+		code, stdout, stderr := run("", "-l", bad, good)
+		if code != 0 || stdout != bad+"\n" || stderr != "" {
+			t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if readFile(t, bad) != unformatted {
+			t.Error("-l must not rewrite the file")
+		}
+	})
+
+	t.Run("-l -w lists and rewrites", func(t *testing.T) {
+		bad, good := setup(t)
+		code, stdout, _ := run("", "-l", "-w", bad, good)
+		if code != 0 || stdout != bad+"\n" {
+			t.Errorf("got code=%d stdout=%q", code, stdout)
+		}
+		if readFile(t, bad) != formatted {
+			t.Error("-w did not rewrite the file")
+		}
+	})
+
+	t.Run("-d prints a unified diff", func(t *testing.T) {
+		bad, good := setup(t)
+		code, stdout, _ := run("", "-d", bad, good)
+		for _, want := range []string{"--- " + bad + ".orig\n", "+++ " + bad + "\n", "-var stmt = spanner.Statement{SQL: `select a from t`}\n", "+SELECT\n"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("diff does not contain %q:\n%s", want, stdout)
+			}
+		}
+		if code != 0 || strings.Contains(stdout, good) {
+			t.Errorf("got code=%d, diff mentions the formatted file:\n%s", code, stdout)
+		}
+	})
+
+	t.Run("without flags prints changed files with a header", func(t *testing.T) {
+		bad, good := setup(t)
+		code, stdout, _ := run("", bad, good)
+		if code != 0 || stdout != "--- "+bad+"\n"+formatted {
+			t.Errorf("got code=%d stdout=%q", code, stdout)
+		}
+	})
+
+	t.Run("no files reads standard input", func(t *testing.T) {
+		code, stdout, stderr := run(unformatted)
+		if code != 0 || stdout != formatted || stderr != "" {
+			t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("- reads standard input and prints source without SQL as is", func(t *testing.T) {
+		code, stdout, _ := run(noSQL, "-")
+		if code != 0 || stdout != noSQL {
+			t.Errorf("got code=%d stdout=%q", code, stdout)
+		}
+	})
+
+	t.Run("-l with standard input", func(t *testing.T) {
+		code, stdout, _ := run(unformatted, "-l")
+		if code != 0 || stdout != "<standard input>\n" {
+			t.Errorf("got code=%d stdout=%q", code, stdout)
+		}
+		code, stdout, _ = run(formatted, "-l")
+		if code != 0 || stdout != "" {
+			t.Errorf("formatted input: got code=%d stdout=%q", code, stdout)
+		}
+	})
+
+	t.Run("-w with standard input is an error", func(t *testing.T) {
+		for _, in := range []string{unformatted, formatted} {
+			code, stdout, stderr := run(in, "-w")
+			if code != 1 || stdout != "" || !strings.Contains(stderr, "<standard input>: -w cannot be used with standard input") {
+				t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			}
+		}
+	})
+
+	t.Run("-h exits 0 and an unknown flag exits 2", func(t *testing.T) {
+		code, stdout, stderr := run("", "-h")
+		if code != 0 || stdout != "" || !strings.Contains(stderr, "usage: go-spantool fmt-sql") {
+			t.Errorf("-h: got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		if code, _, _ := run("", "-x"); code != 2 {
+			t.Errorf("-x: got code=%d, want 2", code)
+		}
+	})
+
+	t.Run("empty standard input is an error that says files can be passed", func(t *testing.T) {
+		code, stdout, stderr := run("", "-l")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "<standard input>: expected Go source on standard input, but it was empty") {
+			t.Errorf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+
+	t.Run("parse error exits 1", func(t *testing.T) {
+		code, _, stderr := run("package q; func(", "-l")
+		if code != 1 || !strings.HasPrefix(stderr, "<standard input>: ") {
+			t.Errorf("got code=%d stderr=%q", code, stderr)
+		}
+	})
 }

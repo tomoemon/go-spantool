@@ -3,64 +3,141 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/hexops/gotextdiff"
+	"github.com/hexops/gotextdiff/myers"
 )
 
 func runFmtSQL(args []string) {
-	fs := flag.NewFlagSet("fmt-sql", flag.ExitOnError)
-	write := fs.Bool("w", false, "write result to (source) file instead of stdout")
-	_ = fs.Parse(args)
+	os.Exit(fmtSQLMain(args, os.Stdin, os.Stdout, os.Stderr))
+}
 
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: go-spantool fmt-sql [-w] file.go ...")
-		os.Exit(1)
+// fmtSQLOptions are the output modes of fmt-sql. They can be combined, as in gofmt.
+type fmtSQLOptions struct {
+	write bool // write the result back to the file
+	list  bool // print the paths of files whose formatting differs
+	diff  bool // print a unified diff of the changes
+}
+
+// stdinName is how standard input is named in the -l and -d output, as in gofmt.
+const stdinName = "<standard input>"
+
+// fmtSQLMain runs fmt-sql and returns the exit code. With no files (or "-"),
+// it reads Go source from stdin and writes the result to stdout.
+func fmtSQLMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("fmt-sql", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var opt fmtSQLOptions
+	fs.BoolVar(&opt.write, "w", false, "write result to (source) file instead of stdout")
+	fs.BoolVar(&opt.list, "l", false, "list files whose formatting differs from fmt-sql's")
+	fs.BoolVar(&opt.diff, "d", false, "display diffs instead of rewriting files")
+	fs.Usage = func() {
+		_, _ = fmt.Fprintln(stderr, "usage: go-spantool fmt-sql [-l] [-d] [-w] [file.go ...]")
+		_, _ = fmt.Fprintln(stderr, "With no files, or with -, reads Go source from standard input.")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0 // -h, as in gofmt
+		}
+		return 2
 	}
 
+	paths := fs.Args()
+	if len(paths) == 0 {
+		paths = []string{"-"}
+	}
 	exitCode := 0
-	for _, path := range fs.Args() {
-		if err := processFile(path, *write); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
+	for _, path := range paths {
+		name, in := path, io.Reader(nil)
+		if path == "-" {
+			name, in = stdinName, stdin
+		}
+		if err := processFile(name, in, stdout, opt); err != nil {
+			_, _ = fmt.Fprintf(stderr, "%s: %v\n", name, err)
 			exitCode = 1
 		}
 	}
-	os.Exit(exitCode)
+	return exitCode
 }
 
-func processFile(path string, write bool) error {
-	src, err := os.ReadFile(path)
+// processFile formats the Go source read from in, or from the file name when
+// in is nil, and prints or writes the result as opt says.
+func processFile(name string, in io.Reader, stdout io.Writer, opt fmtSQLOptions) error {
+	if opt.write && in != nil {
+		return fmt.Errorf("-w cannot be used with standard input, as there is no file to write back to; " +
+			"omit -w to print the formatted source to standard output")
+	}
+	var src []byte
+	var err error
+	if in == nil {
+		src, err = os.ReadFile(name)
+	} else {
+		src, err = io.ReadAll(in)
+	}
 	if err != nil {
 		return err
+	}
+	if in != nil && len(src) == 0 {
+		return errors.New("expected Go source on standard input, but it was empty; " +
+			"fmt-sql reads standard input when no files are given, so pass the .go files to format")
 	}
 
 	out, err := formatGoFile(src)
 	if err != nil {
 		return err
 	}
+	changed := !bytes.Equal(src, out)
 
-	if bytes.Equal(src, out) {
-		return nil
+	if opt.list && changed {
+		if _, err := fmt.Fprintln(stdout, name); err != nil {
+			return err
+		}
 	}
-
-	if write {
-		info, err := os.Stat(path)
+	if opt.diff && changed {
+		before, after := string(src), string(out)
+		edits := myers.ComputeEdits("", before, after)
+		if _, err := fmt.Fprint(stdout, gotextdiff.ToUnified(name+".orig", name, before, edits)); err != nil {
+			return err
+		}
+	}
+	if opt.write && changed {
+		info, err := os.Stat(name)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(path, out, info.Mode())
+		if err := os.WriteFile(name, out, info.Mode()); err != nil {
+			return err
+		}
+	}
+	if opt.list || opt.diff || opt.write {
+		return nil
 	}
 
-	fmt.Printf("--- %s\n", path)
-	_, err = os.Stdout.Write(out)
+	// Standard input is always printed, as in gofmt; a file only when it
+	// changed, after a header
+	if in == nil {
+		if !changed {
+			return nil
+		}
+		if _, err := fmt.Fprintf(stdout, "--- %s\n", name); err != nil {
+			return err
+		}
+	}
+	_, err = stdout.Write(out)
 	return err
 }
 
